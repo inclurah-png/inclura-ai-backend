@@ -241,11 +241,23 @@ const marketplaceSchema = new mongoose.Schema({
 
     currency: {
 
-        type: String,
+    type: String,
 
-        default: "NGN"
+    enum: [
 
-    },
+        "NGN",
+
+        "USD",
+
+        "GBP",
+
+        "EUR"
+
+    ],
+
+    default: "NGN"
+
+},
 
     discountPrice: {
 
