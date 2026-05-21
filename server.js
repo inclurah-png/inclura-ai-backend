@@ -35,7 +35,7 @@ const connectMongoDB =
     require("./database/mongodb");
 
 const connectPostgreSQL =
-    require("./database/postgresql");
+    require("./postgresql");
 
 const connectRedis =
     require("./database/redis");
