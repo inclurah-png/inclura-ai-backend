@@ -1,127 +1,57 @@
+
 /* =========================================================
-   INCLURA GLOBAL ERROR MIDDLEWARE
-   Enterprise Error Handling Infrastructure
+   INCLURA AUTHENTICATION MIDDLEWARE
+   JWT Access Token Verification
    ========================================================= */
 
+const {
+    verifyAccessToken,
+    extractTokenFromHeader
+} = require("./jwt.utils");
+
 /* =========================================================
-   MAIN ERROR HANDLER
+   AUTHENTICATE REQUEST
 ========================================================= */
 
-const errorMiddleware = (
+const authMiddleware = (req, res, next) => {
+    try {
+        const token = extractTokenFromHeader(
+            req.headers.authorization
+        );
 
-    error,
-    req,
-    res,
-    next
+        const decoded = verifyAccessToken(token);
 
-) => {
+        if (
+            !decoded ||
+            typeof decoded.id !== "string" ||
+            !decoded.id.trim()
+        ) {
+            return res.status(401).json({
+                success: false,
+                accessible: true,
+                message: "Invalid authentication token."
+            });
+        }
 
-    console.error(`
-    ============================================
-                INCLURA ERROR
-    ============================================
+        // Use the identity verified from the signed JWT.
+        // Never trust a user ID supplied in the request body.
+        req.user = {
+            id: decoded.id
+        };
 
-    Message:
-    ${error.message}
-
-    Stack:
-    ${error.stack}
-
-    Route:
-    ${req.originalUrl}
-
-    Method:
-    ${req.method}
-
-    ============================================
-    `);
-
-    /* =========================================
-       DEFAULT ERROR VALUES
-    ========================================= */
-
-    let statusCode =
-        error.statusCode || 500;
-
-    let message =
-        error.message ||
-        "Internal Server Error";
-
-    let errors = [];
-
-    /* =========================================
-       MONGODB VALIDATION ERRORS
-    ========================================= */
-
-    if (error.name === "ValidationError") {
-
-        statusCode = 400;
-
-        message =
-            "Validation Error";
-
-        errors =
-            Object.values(error.errors)
-                .map(val => val.message);
-
+        return next();
+    } catch (error) {
+        return res.status(401).json({
+            success: false,
+            accessible: true,
+            message:
+                "Authentication required. Please sign in again."
+        });
     }
+};
 
-    /* =========================================
-       MONGODB CAST ERRORS
-    ========================================= */
+/* =========================================================
+   EXPORT MIDDLEWARE
+========================================================= */
 
-    if (error.name === "CastError") {
-
-        statusCode = 400;
-
-        message =
-            "Invalid Resource ID";
-
-    }
-
-    /* =========================================
-       DUPLICATE KEY ERRORS
-    ========================================= */
-
-    if (error.code === 11000) {
-
-        statusCode = 400;
-
-        message =
-            "Duplicate Field Value";
-
-    }
-
-    /* =========================================
-       JWT ERRORS
-    ========================================= */
-
-    if (error.name === "JsonWebTokenError") {
-
-        statusCode = 401;
-
-        message =
-            "Invalid Authentication Token";
-
-    }
-
-    /* =========================================
-       JWT EXPIRED
-    ========================================= */
-
-    if (error.name === "TokenExpiredError") {
-
-        statusCode = 401;
-
-        message =
-            "Session Expired. Please Login Again.";
-
-    }
-
-    /* =========================================
-       POSTGRESQL ERRORS
-    ========================================= */
-
-    if (error.code === "23505") {
-
-        status
+module.exports = authMiddleware;
