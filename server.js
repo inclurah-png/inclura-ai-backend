@@ -89,15 +89,16 @@ const adminRoutes =
 const notificationRoutes =
     require("./routes/notification.routes");
 
+
 /* =========================================================
    MIDDLEWARE
 ========================================================= */
 
 const authMiddleware =
-    require("./middleware/auth.middleware");
+    require("./auth.middleware");
 
 const errorMiddleware =
-    require("./middleware/error.middleware");
+    require("./error.middleware");
 
 /* =========================================================
    EXPRESS APP
