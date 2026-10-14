@@ -1,635 +1,251 @@
-/* =========================================================
-   INCLURA ENTERPRISE SERVER
-   Main Backend Server Infrastructure
-   ========================================================= */
-
-/* =========================================================
-   CORE IMPORTS
-========================================================= */
+/*
+ * INCLURA ENTERPRISE SERVER
+ * Existing API routes, database connections, Socket.IO,
+ * security middleware, and creator-score integration.
+ */
 
 require("dotenv").config();
 
 const express = require("express");
-
 const http = require("http");
-
 const cors = require("cors");
-
 const helmet = require("helmet");
-
 const compression = require("compression");
-
 const morgan = require("morgan");
-
 const cookieParser = require("cookie-parser");
-
 const rateLimit = require("express-rate-limit");
-
 const { Server } = require("socket.io");
 
-/* =========================================================
-   DATABASE CONNECTIONS
-========================================================= */
+// Database connections
+const connectMongoDB = require("./database/mongodb");
+const connectPostgreSQL = require("./postgresql");
+const connectRedis = require("./database/redis");
 
-const connectMongoDB =
-    require("./database/mongodb");
+// Existing API routes
+const authRoutes = require("./routes/auth.routes");
+const userRoutes = require("./routes/user.routes");
+const postRoutes = require("./routes/post.routes");
+const reelRoutes = require("./routes/reel.routes");
+const livestreamRoutes = require("./routes/livestream.routes");
+const marketplaceRoutes = require("./routes/marketplace.routes");
+const walletRoutes = require("./routes/wallet.routes");
+const mentorshipRoutes = require("./routes/mentorship.routes");
+const emergencyRoutes = require("./routes/emergency.routes");
+const careGigRoutes = require("./routes/caregig.routes");
+const topupRoutes = require("./routes/topup.routes");
+const crossPostRoutes = require("./routes/crosspost.routes");
+const analyticsRoutes = require("./routes/analytics.routes");
+const adminRoutes = require("./routes/admin.routes");
+const notificationRoutes = require("./routes/notification.routes");
 
-const connectPostgreSQL =
-    require("./postgresql");
+// Creator-score route
+const creatorScoreRoutes = require("./creatorScore.routes");
 
-const connectRedis =
-    require("./database/redis");
+// Existing root-level middleware files
+const authMiddleware = require("./auth.middleware");
+const errorMiddleware = require("./error.middleware");
 
-/* =========================================================
-   ROUTES
-========================================================= */
-
-const authRoutes =
-    require("./routes/auth.routes");
-
-const userRoutes =
-    require("./routes/user.routes");
-
-const postRoutes =
-    require("./routes/post.routes");
-
-const reelRoutes =
-    require("./routes/reel.routes");
-
-const livestreamRoutes =
-    require("./routes/livestream.routes");
-
-const marketplaceRoutes =
-    require("./routes/marketplace.routes");
-
-const walletRoutes =
-    require("./routes/wallet.routes");
-
-const mentorshipRoutes =
-    require("./routes/mentorship.routes");
-
-const emergencyRoutes =
-    require("./routes/emergency.routes");
-
-const careGigRoutes =
-    require("./routes/caregig.routes");
-
-const topupRoutes =
-    require("./routes/topup.routes");
-
-const crossPostRoutes =
-    require("./routes/crosspost.routes");
-
-const analyticsRoutes =
-    require("./routes/analytics.routes");
-
-const adminRoutes =
-    require("./routes/admin.routes");
-
-const notificationRoutes =
-    require("./routes/notification.routes");
-
-
-/* =========================================================
-   MIDDLEWARE
-========================================================= */
-
-const authMiddleware =
-    require("./auth.middleware");
-
-const errorMiddleware =
-    require("./error.middleware");
-
-/* =========================================================
-   EXPRESS APP
-========================================================= */
-
+// Express application
 const app = express();
-
 const server = http.createServer(app);
 
-/* =========================================================
-   SOCKET.IO
-========================================================= */
-
+// Socket.IO
 const io = new Server(server, {
-
-    cors: {
-
-        origin: "*",
-
-        methods: ["GET", "POST"]
-
-    }
-
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
 });
 
-/* =========================================================
-   SECURITY MIDDLEWARE
-========================================================= */
+// --------------------------------------------------
+// SECURITY AND REQUEST MIDDLEWARE
+// --------------------------------------------------
 
 app.use(helmet());
 
-app.use(cors({
-
+app.use(
+  cors({
     origin: "*",
-
-    credentials: true
-
-}));
+    credentials: true,
+  })
+);
 
 app.use(compression());
-
 app.use(cookieParser());
 
-/* =========================================================
-   BODY PARSER
-========================================================= */
+app.use(
+  express.json({
+    limit: "100mb",
+  })
+);
 
-app.use(express.json({
-
-    limit: "100mb"
-
-}));
-
-app.use(express.urlencoded({
-
+app.use(
+  express.urlencoded({
     extended: true,
-
-    limit: "100mb"
-
-}));
-
-/* =========================================================
-   LOGGER
-========================================================= */
+    limit: "100mb",
+  })
+);
 
 app.use(morgan("dev"));
 
-/* =========================================================
-   RATE LIMITER
-========================================================= */
-
 const limiter = rateLimit({
-
-    windowMs: 15 * 60 * 1000,
-
-    max: 1000,
-
-    message:
-        "Too many requests. Please try again later."
-
+  windowMs: 15 * 60 * 1000,
+  max: 1000,
+  message: "Too many requests. Please try again later.",
 });
 
 app.use(limiter);
 
-/* =========================================================
-   STATIC FILES
-========================================================= */
-
-app.use(
-
-    "/uploads",
-
-    express.static("uploads")
-
-);
-
-/* =========================================================
-   ACCESSIBILITY HEADERS
-========================================================= */
+app.use("/uploads", express.static("uploads"));
 
 app.use((req, res, next) => {
-
-    res.setHeader(
-
-        "X-Inclura-Accessibility",
-
-        "enabled"
-
-    );
-
-    next();
-
+  res.setHeader("X-Inclura-Accessibility", "enabled");
+  next();
 });
 
-/* =========================================================
-   HEALTH CHECK
-========================================================= */
+// --------------------------------------------------
+// HEALTH CHECK
+// --------------------------------------------------
 
 app.get("/", (req, res) => {
-
-    res.status(200).json({
-
-        success: true,
-
-        message:
-            "Inclura Backend Running Successfully",
-
-        version: "1.0.0"
-
-    });
-
+  res.status(200).json({
+    success: true,
+    message: "Inclura Backend Running Successfully",
+    version: "1.0.0",
+  });
 });
 
-/* =========================================================
-   API ROUTES
-========================================================= */
-
-app.use(
-
-    "/api/auth",
-
-    authRoutes
-
-);
-
-app.use(
-
-    "/api/users",
-
-    authMiddleware,
-
-    userRoutes
-
-);
-
-app.use(
-
-    "/api/posts",
-
-    authMiddleware,
-
-    postRoutes
-
-);
-
-app.use(
-
-    "/api/reels",
-
-    authMiddleware,
-
-    reelRoutes
-
-);
-
-app.use(
-
-    "/api/livestream",
-
-    authMiddleware,
-
-    livestreamRoutes
-
-);
-
-app.use(
-
-    "/api/marketplace",
-
-    authMiddleware,
-
-    marketplaceRoutes
-
-);
-
-app.use(
-
-    "/api/wallet",
-
-    authMiddleware,
-
-    walletRoutes
-
-);
-
-app.use(
-
-    "/api/mentorship",
-
-    authMiddleware,
-
-    mentorshipRoutes
-
-);
-
-app.use(
-
-    "/api/emergency",
-
-    authMiddleware,
-
-    emergencyRoutes
-
-);
-
-app.use(
-
-    "/api/care-gigs",
-
-    authMiddleware,
-
-    careGigRoutes
-
-);
-
-app.use(
-
-    "/api/topup",
-
-    authMiddleware,
-
-    topupRoutes
-
-);
-
-app.use(
-
-    "/api/crosspost",
-
-    authMiddleware,
-
-    crossPostRoutes
-
-);
-
-app.use(
-
-    "/api/analytics",
-
-    authMiddleware,
-
-    analyticsRoutes
-
-);
-
-app.use(
-
-    "/api/admin",
-
-    authMiddleware,
-
-    adminRoutes
-
-);
-
-app.use(
-
-    "/api/notifications",
-
-    authMiddleware,
-
-    notificationRoutes
-
-);
-
-/* =========================================================
-   SOCKET EVENTS
-========================================================= */
+// --------------------------------------------------
+// API ROUTES
+// --------------------------------------------------
+
+// Authentication
+app.use("/api/auth", authRoutes);
+
+// Creator-score endpoint.
+// Firebase ID-token verification is handled inside
+// creatorScore.routes.js by firebaseAuth.middleware.js.
+// Do not put the existing JWT authMiddleware in front
+// of this route.
+app.use("/api/creator-score", creatorScoreRoutes);
+
+// Existing protected routes
+app.use("/api/users", authMiddleware, userRoutes);
+app.use("/api/posts", authMiddleware, postRoutes);
+app.use("/api/reels", authMiddleware, reelRoutes);
+app.use("/api/livestream", authMiddleware, livestreamRoutes);
+app.use("/api/marketplace", authMiddleware, marketplaceRoutes);
+app.use("/api/wallet", authMiddleware, walletRoutes);
+app.use("/api/mentorship", authMiddleware, mentorshipRoutes);
+app.use("/api/emergency", authMiddleware, emergencyRoutes);
+app.use("/api/care-gigs", authMiddleware, careGigRoutes);
+app.use("/api/topup", authMiddleware, topupRoutes);
+app.use("/api/crosspost", authMiddleware, crossPostRoutes);
+app.use("/api/analytics", authMiddleware, analyticsRoutes);
+app.use("/api/admin", authMiddleware, adminRoutes);
+app.use("/api/notifications", authMiddleware, notificationRoutes);
+
+// --------------------------------------------------
+// SOCKET.IO EVENTS
+// --------------------------------------------------
 
 io.on("connection", (socket) => {
+  console.log("Socket connected:", socket.id);
 
-    console.log(
+  socket.on("send_message", (data) => {
+    socket.broadcast.emit("receive_message", data);
+  });
 
-        `User Connected: ${socket.id}`
+  socket.on("livestream_chat", (data) => {
+    io.emit("livestream_chat", data);
+  });
 
-    );
+  socket.on("typing", (data) => {
+    socket.broadcast.emit("typing", data);
+  });
 
-    /* =========================================
-       REALTIME MESSAGING
-    ========================================= */
+  socket.on("send_notification", (data) => {
+    socket.broadcast.emit("receive_notification", data);
+  });
 
-    socket.on("send_message", (data) => {
+  socket.on("emergency_alert", (data) => {
+    io.emit("emergency_alert", data);
+  });
 
-        io.emit("receive_message", data);
-
+  socket.on("voice_navigation", (data) => {
+    socket.emit("voice_navigation_response", {
+      success: true,
+      data,
     });
+  });
 
-    /* =========================================
-       LIVESTREAM CHAT
-    ========================================= */
-
-    socket.on("livestream_chat", (data) => {
-
-        io.emit("livestream_chat_update", data);
-
-    });
-
-    /* =========================================
-       TYPING INDICATOR
-    ========================================= */
-
-    socket.on("typing", (data) => {
-
-        socket.broadcast.emit(
-
-            "user_typing",
-
-            data
-
-        );
-
-    });
-
-    /* =========================================
-       NOTIFICATIONS
-    ========================================= */
-
-    socket.on("send_notification", (data) => {
-
-        io.emit("receive_notification", data);
-
-    });
-
-    /* =========================================
-       EMERGENCY ALERTS
-    ========================================= */
-
-    socket.on("emergency_alert", (data) => {
-
-        io.emit("emergency_broadcast", data);
-
-    });
-
-    /* =========================================
-       ACCESSIBILITY EVENTS
-    ========================================= */
-
-    socket.on("voice_navigation", (data) => {
-
-        io.emit(
-
-            "voice_navigation_update",
-
-            data
-
-        );
-
-    });
-
-    /* =========================================
-       DISCONNECT
-    ========================================= */
-
-    socket.on("disconnect", () => {
-
-        console.log(
-
-            `User Disconnected: ${socket.id}`
-
-        );
-
-    });
-
+  socket.on("disconnect", () => {
+    console.log("Socket disconnected:", socket.id);
+  });
 });
 
-/* =========================================================
-   DATABASE INITIALIZATION
-========================================================= */
+// --------------------------------------------------
+// DATABASE INITIALIZATION
+// --------------------------------------------------
 
 const initializeDatabases = async () => {
+  try {
+    await connectMongoDB();
+    await connectPostgreSQL();
+    await connectRedis();
 
-    try {
-
-        await connectMongoDB();
-
-        await connectPostgreSQL();
-
-        await connectRedis();
-
-        console.log(
-            "All databases connected successfully"
-        );
-
-    } catch(error) {
-
-        console.error(
-
-            "Database initialization failed",
-
-            error
-
-        );
-
-        process.exit(1);
-
-    }
-
+    console.log("All databases connected successfully");
+  } catch (error) {
+    console.error("Database initialization failed:", error);
+    process.exit(1);
+  }
 };
 
-/* =========================================================
-   ERROR HANDLER
-========================================================= */
+// --------------------------------------------------
+// ERROR HANDLING AND NOT FOUND
+// Keep these after all API routes.
+// --------------------------------------------------
 
 app.use(errorMiddleware);
 
-/* =========================================================
-   404 HANDLER
-========================================================= */
-
 app.use((req, res) => {
-
-    res.status(404).json({
-
-        success: false,
-
-        message: "Route not found"
-
-    });
-
+  res.status(404).json({
+    success: false,
+    message: "Route not found",
+  });
 });
 
-/* =========================================================
-   SERVER START
-========================================================= */
+// --------------------------------------------------
+// SERVER STARTUP
+// --------------------------------------------------
 
-const PORT =
-    process.env.PORT || 5000;
+const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
+  await initializeDatabases();
 
-    await initializeDatabases();
-
-    server.listen(PORT, () => {
-
-        console.log(`
-        ============================================
-                 INCLURA SERVER STARTED
-        ============================================
-
-        Environment: ${process.env.NODE_ENV}
-
-        Port: ${PORT}
-
-        API URL:
-        http://localhost:${PORT}
-
-        Socket.IO Enabled
-
-        Accessibility Engine Active
-
-        Livestream Engine Ready
-
-        ============================================
-        `);
-
-    });
-
+  server.listen(PORT, () => {
+    console.log(`Inclura backend listening on port ${PORT}`);
+  });
 };
 
 startServer();
 
-/* =========================================================
-   GLOBAL ERROR CATCHERS
-========================================================= */
+// --------------------------------------------------
+// PROCESS-LEVEL ERROR HANDLING
+// --------------------------------------------------
 
-process.on(
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+});
 
-    "uncaughtException",
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
 
-    (error) => {
-
-        console.error(
-
-            "Uncaught Exception",
-
-            error
-
-        );
-
-    }
-
-);
-
-process.on(
-
-    "unhandledRejection",
-
-    (error) => {
-
-        console.error(
-
-            "Unhandled Rejection",
-
-            error
-
-        );
-
-    }
-
-);
-
-/* =========================================================
-   EXPORTS
-========================================================= */
-
+// Exports
 module.exports = {
-
-    app,
-
-    server,
-
-    io
-
+  app,
+  server,
+  io,
 };
