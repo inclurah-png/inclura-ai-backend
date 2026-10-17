@@ -225,7 +225,7 @@ def award_creator_activity(
             detail="A valid sign-in token is required.",
         )
 
-        try:
+            try:
         get_firebase_admin()
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token.get("uid")
