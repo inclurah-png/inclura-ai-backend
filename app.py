@@ -54,15 +54,24 @@ def get_firebase_admin():
         )
 
         if not all(service_account.get(key) for key in required_fields):
-            raise ValueError("Required service-account fields are missing.")
+            raise ValueError(
+                "Required service-account fields are missing."
+            )
 
         service_account["private_key"] = (
             service_account["private_key"].replace("\\n", "\n")
         )
 
-        firebase_credential = credentials.Certificate(service_account)
+        firebase_credential = credentials.Certificate(
+            service_account
+        )
 
-        return firebase_admin.initialize_app(firebase_credential)
+        return firebase_admin.initialize_app(
+            firebase_credential
+        )
+
+    except HTTPException:
+        raise
 
     except Exception as error:
         print(
@@ -184,13 +193,19 @@ def get_owned_activity(db, uid, activity_type, activity_id):
         if find_activity_owner(data) != uid:
             raise HTTPException(
                 status_code=403,
-                detail="You are not authorized to earn points for this activity.",
+                detail=(
+                    "You are not authorized to earn points "
+                    "for this activity."
+                ),
             )
 
         if not activity_matches_type(data, activity_type):
             raise HTTPException(
                 status_code=400,
-                detail="The activity does not match the requested activity type.",
+                detail=(
+                    "The activity does not match the "
+                    "requested activity type."
+                ),
             )
 
         return collection_name
@@ -210,7 +225,7 @@ def award_creator_activity(
     payload: CreatorScoreRequest,
     authorization: str | None = Header(default=None),
 ):
-    # Authenticate the user with a Firebase ID token.
+    # Require a Firebase ID token.
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
@@ -225,8 +240,10 @@ def award_creator_activity(
             detail="A valid sign-in token is required.",
         )
 
-            try:
+    # Initialize Firebase Admin before verifying the token.
+    try:
         get_firebase_admin()
+
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token.get("uid")
 
@@ -247,7 +264,10 @@ def award_creator_activity(
 
         raise HTTPException(
             status_code=401,
-            detail="Your session is invalid or has expired. Please sign in again.",
+            detail=(
+                "Your session is invalid or has expired. "
+                "Please sign in again."
+            ),
         ) from error
 
     activity_id = payload.activityId.strip()
@@ -264,8 +284,8 @@ def award_creator_activity(
     try:
         db = get_firestore()
 
-        # Verify the activity exists and belongs to the
-        # authenticated user before awarding points.
+        # Verify that the activity exists and belongs to
+        # the authenticated user before awarding points.
         get_owned_activity(
             db,
             uid,
@@ -275,8 +295,7 @@ def award_creator_activity(
 
         user_ref = db.collection("users").document(uid)
 
-        # A deterministic ID prevents awarding the same
-        # activity more than once.
+        # A deterministic ID prevents duplicate awards.
         award_id = hashlib.sha256(
             f"{uid}:{activity_type}:{activity_id}".encode("utf-8")
         ).hexdigest()
@@ -291,7 +310,9 @@ def award_creator_activity(
         if not user_snapshot.exists:
             raise HTTPException(
                 status_code=404,
-                detail="Your Inclura user profile could not be found.",
+                detail=(
+                    "Your Inclura user profile could not be found."
+                ),
             )
 
         transaction = db.transaction()
@@ -307,7 +328,9 @@ def award_creator_activity(
             )
 
             if not current_user.exists:
-                raise ValueError("User profile no longer exists.")
+                raise ValueError(
+                    "User profile no longer exists."
+                )
 
             user_data = current_user.to_dict() or {}
             economy = user_data.get("creatorEconomy") or {}
@@ -327,9 +350,7 @@ def award_creator_activity(
                 }
 
             updates = {
-                "creatorEconomy.score": (
-                    current_score + points
-                ),
+                "creatorEconomy.score": current_score + points,
             }
 
             if activity_type == "video_post":
@@ -400,5 +421,8 @@ def award_creator_activity(
 
         raise HTTPException(
             status_code=500,
-            detail="Creator scoring could not be recorded. Please try again later.",
+            detail=(
+                "Creator scoring could not be recorded. "
+                "Please try again later."
+            ),
         ) from error
