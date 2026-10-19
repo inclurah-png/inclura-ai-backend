@@ -1,3 +1,4 @@
+
 import hashlib
 import json
 import os
@@ -15,8 +16,6 @@ app = FastAPI(
     version="1.1.0",
 )
 
-# CORS allows the frontend to call this API.
-# Authentication is still required for creator scoring.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,24 +53,15 @@ def get_firebase_admin():
         )
 
         if not all(service_account.get(key) for key in required_fields):
-            raise ValueError(
-                "Required service-account fields are missing."
-            )
+            raise ValueError("Required service-account fields are missing.")
 
         service_account["private_key"] = (
             service_account["private_key"].replace("\\n", "\n")
         )
 
-        firebase_credential = credentials.Certificate(
-            service_account
-        )
+        firebase_credential = credentials.Certificate(service_account)
 
-        return firebase_admin.initialize_app(
-            firebase_credential
-        )
-
-    except HTTPException:
-        raise
+        return firebase_admin.initialize_app(firebase_credential)
 
     except Exception as error:
         print(
@@ -148,13 +138,40 @@ OWNER_FIELDS = (
 # --------------------------------------------------
 
 def find_activity_owner(data):
+    owners = []
+
     for field in OWNER_FIELDS:
         value = data.get(field)
 
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        if value is None or value == "":
+            continue
 
-    return None
+        if not isinstance(value, str):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid ownership field: {field}.",
+            )
+
+        value = value.strip()
+
+        if value:
+            owners.append((field, value))
+
+    if not owners:
+        return None
+
+    unique_owners = {value for _, value in owners}
+
+    if len(unique_owners) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Conflicting ownership fields detected. "
+                "Creator scoring has been rejected."
+            ),
+        )
+
+    return owners[0][1]
 
 
 def activity_matches_type(data, activity_type):
@@ -193,19 +210,13 @@ def get_owned_activity(db, uid, activity_type, activity_id):
         if find_activity_owner(data) != uid:
             raise HTTPException(
                 status_code=403,
-                detail=(
-                    "You are not authorized to earn points "
-                    "for this activity."
-                ),
+                detail="You are not authorized to earn points for this activity.",
             )
 
         if not activity_matches_type(data, activity_type):
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "The activity does not match the "
-                    "requested activity type."
-                ),
+                detail="The activity does not match the requested activity type.",
             )
 
         return collection_name
@@ -225,7 +236,6 @@ def award_creator_activity(
     payload: CreatorScoreRequest,
     authorization: str | None = Header(default=None),
 ):
-    # Require a Firebase ID token.
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
@@ -240,10 +250,7 @@ def award_creator_activity(
             detail="A valid sign-in token is required.",
         )
 
-    # Initialize Firebase Admin before verifying the token.
     try:
-        get_firebase_admin()
-
         decoded_token = auth.verify_id_token(id_token)
         uid = decoded_token.get("uid")
 
@@ -264,10 +271,7 @@ def award_creator_activity(
 
         raise HTTPException(
             status_code=401,
-            detail=(
-                "Your session is invalid or has expired. "
-                "Please sign in again."
-            ),
+            detail="Your session is invalid or has expired. Please sign in again.",
         ) from error
 
     activity_id = payload.activityId.strip()
@@ -284,9 +288,7 @@ def award_creator_activity(
     try:
         db = get_firestore()
 
-        # Verify that the activity exists and belongs to
-        # the authenticated user before awarding points.
-        get_owned_activity(
+        activity_collection = get_owned_activity(
             db,
             uid,
             activity_type,
@@ -295,7 +297,6 @@ def award_creator_activity(
 
         user_ref = db.collection("users").document(uid)
 
-        # A deterministic ID prevents duplicate awards.
         award_id = hashlib.sha256(
             f"{uid}:{activity_type}:{activity_id}".encode("utf-8")
         ).hexdigest()
@@ -310,9 +311,7 @@ def award_creator_activity(
         if not user_snapshot.exists:
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    "Your Inclura user profile could not be found."
-                ),
+                detail="Your Inclura user profile could not be found.",
             )
 
         transaction = db.transaction()
@@ -328,20 +327,39 @@ def award_creator_activity(
             )
 
             if not current_user.exists:
-                raise ValueError(
-                    "User profile no longer exists."
+                raise HTTPException(
+                    status_code=404,
+                    detail="Your Inclura user profile could not be found.",
                 )
 
             user_data = current_user.to_dict() or {}
-            economy = user_data.get("creatorEconomy") or {}
+            economy = user_data.get("creatorEconomy")
 
-            if not isinstance(economy, dict):
+            if economy is None:
                 economy = {}
+            elif not isinstance(economy, dict):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The stored creator economy data is invalid. "
+                        "The score was not changed."
+                    ),
+                )
 
             current_score = economy.get("score", 0)
 
-            if not isinstance(current_score, (int, float)):
-                current_score = 0
+            if (
+                isinstance(current_score, bool)
+                or not isinstance(current_score, int)
+                or current_score < 0
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The stored creator score is invalid. "
+                        "The score was not changed."
+                    ),
+                )
 
             if existing_award.exists:
                 return {
@@ -354,24 +372,16 @@ def award_creator_activity(
             }
 
             if activity_type == "video_post":
-                updates["monthlyVideoPosts"] = (
-                    firestore.Increment(1)
-                )
+                updates["monthlyVideoPosts"] = firestore.Increment(1)
 
             elif activity_type == "text_post":
-                updates["monthlyTextPosts"] = (
-                    firestore.Increment(1)
-                )
+                updates["monthlyTextPosts"] = firestore.Increment(1)
 
             elif activity_type == "cross_post":
-                updates["monthlyCrossPosts"] = (
-                    firestore.Increment(1)
-                )
+                updates["monthlyCrossPosts"] = firestore.Increment(1)
 
             elif activity_type == "comment":
-                updates["communityTrust"] = (
-                    firestore.Increment(points)
-                )
+                updates["communityTrust"] = firestore.Increment(points)
 
             transaction.update(user_ref, updates)
 
@@ -402,9 +412,10 @@ def award_creator_activity(
             ),
             "activityType": activity_type,
             "activityId": activity_id,
-            "pointsAwarded": (
-                0 if result["duplicate"] else points
-            ),
+            "activityCollection": activity_collection,
+            "userId": uid,
+            "userDocumentPath": f"users/{uid}",
+            "pointsAwarded": 0 if result["duplicate"] else points,
             "score": result["score"],
             "duplicate": result["duplicate"],
         }
@@ -421,8 +432,5 @@ def award_creator_activity(
 
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Creator scoring could not be recorded. "
-                "Please try again later."
-            ),
+            detail="Creator scoring could not be recorded. Please try again later.",
         ) from error
