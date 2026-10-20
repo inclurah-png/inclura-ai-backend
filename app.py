@@ -433,3 +433,228 @@ def award_creator_activity(
             status_code=500,
             detail="Creator scoring could not be recorded. Please try again later.",
         ) from error
+
+# --------------------------------------------------
+# AUTHENTICATED POST REACTIONS AND CREATOR ENGAGEMENT
+# --------------------------------------------------
+
+class PostReactionRequest(BaseModel):
+    emoji: Literal[
+        "❤️", "👏", "😊", "👍",
+        "😂", "😮", "😢", "👎"
+    ]
+
+
+REACTION_POINTS = {
+    "❤️": 4,
+    "👏": 3,
+    "😊": 3,
+    "👍": 2,
+    "😂": 2,
+    "😮": 2,
+    "😢": 2,
+    "👎": -3,
+}
+
+
+@app.post("/api/posts/{post_id}/react")
+def react_to_post(
+    post_id: str,
+    payload: PostReactionRequest,
+    authorization: str | None = Header(default=None),
+):
+    # 1. Authenticate the reacting user.
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Please sign in to react to a post.",
+        )
+
+    id_token = authorization[7:].strip()
+
+    if not id_token:
+        raise HTTPException(
+            status_code=401,
+            detail="A valid sign-in token is required.",
+        )
+
+    try:
+        get_firebase_admin()
+        decoded_token = auth.verify_id_token(id_token)
+        reactor_uid = decoded_token.get("uid")
+
+        if not reactor_uid:
+            raise HTTPException(
+                status_code=401,
+                detail="The sign-in token is invalid.",
+            )
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        print("Reaction authentication failed:", type(error).__name__)
+        raise HTTPException(
+            status_code=401,
+            detail="Your session is invalid or has expired.",
+        ) from error
+
+    if not post_id or len(post_id) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="A valid post ID is required.",
+        )
+
+    try:
+        db = get_firestore()
+        post_ref = db.collection("posts").document(post_id)
+
+        transaction = db.transaction()
+
+        @firestore.transactional
+        def apply_reaction(transaction):
+            # Read the post first to establish its real creator.
+            post_snapshot = post_ref.get(transaction=transaction)
+
+            if not post_snapshot.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="This post could not be found.",
+                )
+
+            post_data = post_snapshot.to_dict() or {}
+            creator_uid = post_data.get("userId")
+
+            if not isinstance(creator_uid, str) or not creator_uid.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="This post has no valid creator ID.",
+                )
+
+            if creator_uid == reactor_uid:
+                raise HTTPException(
+                    status_code=403,
+                    detail="You cannot earn engagement points by reacting to your own post.",
+                )
+
+            creator_ref = db.collection("users").document(creator_uid)
+            creator_snapshot = creator_ref.get(transaction=transaction)
+
+            if not creator_snapshot.exists:
+                raise HTTPException(
+                    status_code=404,
+                    detail="The creator's user profile could not be found.",
+                )
+
+            # Read the existing reaction state.
+            user_reactions = post_data.get("userReactions") or {}
+
+            if not isinstance(user_reactions, dict):
+                user_reactions = {}
+
+            user_reactions = dict(user_reactions)
+            previous_emoji = user_reactions.get(reactor_uid)
+
+            reactions = {
+                "👍": 0,
+                "❤️": 0,
+                "😂": 0,
+                "😊": 0,
+                "😮": 0,
+                "😢": 0,
+                "👏": 0,
+                "👎": 0,
+            }
+
+            stored_reactions = post_data.get("reactions") or {}
+
+            if isinstance(stored_reactions, dict):
+                for emoji in reactions:
+                    try:
+                        reactions[emoji] = max(
+                            0, int(stored_reactions.get(emoji, 0))
+                        )
+                    except (TypeError, ValueError):
+                        reactions[emoji] = 0
+
+            # Calculate the post's score from its recorded
+            # individual reactions, not from a client-supplied score.
+            old_post_score = sum(
+                REACTION_POINTS.get(emoji, 0)
+                for emoji in user_reactions.values()
+            )
+
+            if previous_emoji == payload.emoji:
+                # Clicking the same reaction again removes it.
+                reactions[payload.emoji] = max(
+                    0, reactions[payload.emoji] - 1
+                )
+                user_reactions.pop(reactor_uid, None)
+            else:
+                # Replace an existing reaction, if present.
+                if previous_emoji in REACTION_POINTS:
+                    reactions[previous_emoji] = max(
+                        0, reactions[previous_emoji] - 1
+                    )
+
+                reactions[payload.emoji] += 1
+                user_reactions[reactor_uid] = payload.emoji
+
+            new_post_score = sum(
+                REACTION_POINTS.get(emoji, 0)
+                for emoji in user_reactions.values()
+            )
+
+            score_delta = new_post_score - old_post_score
+
+            creator_data = creator_snapshot.to_dict() or {}
+            current_creator_score = creator_data.get("creatorScore", 0)
+
+            if not isinstance(current_creator_score, (int, float)):
+                current_creator_score = 0
+
+            new_creator_score = current_creator_score + score_delta
+
+            # Both writes are performed together by the trusted backend.
+            transaction.update(
+                post_ref,
+                {
+                    "reactions": reactions,
+                    "userReactions": user_reactions,
+                    "creatorScore": new_post_score,
+                },
+            )
+
+            transaction.update(
+                creator_ref,
+                {
+                    "creatorScore": new_creator_score,
+                },
+            )
+
+            return {
+                "reactions": reactions,
+                "userReactions": user_reactions,
+                "postCreatorScore": new_post_score,
+                "creatorScore": new_creator_score,
+                "scoreChange": score_delta,
+            }
+
+        result = apply_reaction(transaction)
+
+        return {
+            "success": True,
+            **result,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as error:
+        print(
+            "Reaction processing failed:",
+            type(error).__name__,
+            str(error),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="The reaction could not be saved. Please try again.",
+        ) from error
