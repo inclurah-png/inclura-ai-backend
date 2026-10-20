@@ -1,4 +1,3 @@
-
 import hashlib
 import json
 import os
@@ -265,10 +264,10 @@ def award_creator_activity(
 
     except Exception as error:
         print(
-            "Creator-score authentication failed:",
-            type(error).__name__,
-        )
-
+    "Creator-score authentication failed:",
+    type(error).__name__,
+    str(error),
+)
         raise HTTPException(
             status_code=401,
             detail="Your session is invalid or has expired. Please sign in again.",
