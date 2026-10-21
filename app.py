@@ -438,11 +438,11 @@ def award_creator_activity(
 # AUTHENTICATED POST REACTIONS AND CREATOR ENGAGEMENT
 # --------------------------------------------------
 
+
+# AUTHENTICATED POST REACTIONS AND CREATOR ENGAGEMENT
+
 class PostReactionRequest(BaseModel):
-    emoji: Literal[
-        "❤️", "👏", "😊", "👍",
-        "😂", "😮", "😢", "👎"
-    ]
+    emoji: Literal["❤️", "👏", "😊", "👍", "😂", "😮", "😢", "👎"]
 
 
 REACTION_POINTS = {
@@ -463,68 +463,44 @@ def react_to_post(
     payload: PostReactionRequest,
     authorization: str | None = Header(default=None),
 ):
-    # 1. Authenticate the reacting user.
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
             detail="Please sign in to react to a post.",
         )
 
-    id_token = authorization[7:].strip()
-
-    if not id_token:
-        raise HTTPException(
-            status_code=401,
-            detail="A valid sign-in token is required.",
-        )
-
     try:
-        get_firebase_admin()
-        decoded_token = auth.verify_id_token(id_token)
+        firebase_app = get_firebase_admin()
+        decoded_token = auth.verify_id_token(
+            authorization.split(" ", 1)[1],
+            app=firebase_app,
+        )
         reactor_uid = decoded_token.get("uid")
 
         if not reactor_uid:
             raise HTTPException(
                 status_code=401,
-                detail="The sign-in token is invalid.",
+                detail="Unable to verify your account.",
             )
 
-    except HTTPException:
-        raise
-    except Exception as error:
-        print("Reaction authentication failed:", type(error).__name__)
-        raise HTTPException(
-            status_code=401,
-            detail="Your session is invalid or has expired.",
-        ) from error
-
-    if not post_id or len(post_id) > 200:
-        raise HTTPException(
-            status_code=400,
-            detail="A valid post ID is required.",
-        )
-
-    try:
         db = get_firestore()
         post_ref = db.collection("posts").document(post_id)
-
         transaction = db.transaction()
 
         @firestore.transactional
         def apply_reaction(transaction):
-            # Read the post first to establish its real creator.
             post_snapshot = post_ref.get(transaction=transaction)
 
             if not post_snapshot.exists:
                 raise HTTPException(
                     status_code=404,
-                    detail="This post could not be found.",
+                    detail="Post not found.",
                 )
 
             post_data = post_snapshot.to_dict() or {}
             creator_uid = post_data.get("userId")
 
-            if not isinstance(creator_uid, str) or not creator_uid.strip():
+            if not creator_uid:
                 raise HTTPException(
                     status_code=400,
                     detail="This post has no valid creator ID.",
@@ -542,119 +518,117 @@ def react_to_post(
             if not creator_snapshot.exists:
                 raise HTTPException(
                     status_code=404,
-                    detail="The creator's user profile could not be found.",
+                    detail="The post creator's profile was not found.",
                 )
-
-            # Read the existing reaction state.
-            user_reactions = post_data.get("userReactions") or {}
-
-            if not isinstance(user_reactions, dict):
-                user_reactions = {}
-
-            user_reactions = dict(user_reactions)
-            previous_emoji = user_reactions.get(reactor_uid)
-
-            reactions = {
-                "👍": 0,
-                "❤️": 0,
-                "😂": 0,
-                "😊": 0,
-                "😮": 0,
-                "😢": 0,
-                "👏": 0,
-                "👎": 0,
-            }
-
-            stored_reactions = post_data.get("reactions") or {}
-
-            if isinstance(stored_reactions, dict):
-                for emoji in reactions:
-                    try:
-                        reactions[emoji] = max(
-                            0, int(stored_reactions.get(emoji, 0))
-                        )
-                    except (TypeError, ValueError):
-                        reactions[emoji] = 0
-
-            # Calculate the post's score from its recorded
-            # individual reactions, not from a client-supplied score.
-            old_post_score = sum(
-                REACTION_POINTS.get(emoji, 0)
-                for emoji in user_reactions.values()
-            )
-
-            if previous_emoji == payload.emoji:
-                # Clicking the same reaction again removes it.
-                reactions[payload.emoji] = max(
-                    0, reactions[payload.emoji] - 1
-                )
-                user_reactions.pop(reactor_uid, None)
-            else:
-                # Replace an existing reaction, if present.
-                if previous_emoji in REACTION_POINTS:
-                    reactions[previous_emoji] = max(
-                        0, reactions[previous_emoji] - 1
-                    )
-
-                reactions[payload.emoji] += 1
-                user_reactions[reactor_uid] = payload.emoji
-
-            new_post_score = sum(
-                REACTION_POINTS.get(emoji, 0)
-                for emoji in user_reactions.values()
-            )
-
-            score_delta = new_post_score - old_post_score
 
             creator_data = creator_snapshot.to_dict() or {}
-            current_creator_score = creator_data.get("creatorScore", 0)
 
-            if not isinstance(current_creator_score, (int, float)):
-                current_creator_score = 0
+            # Keep the per-user reaction record authoritative.
+            stored_user_reactions = post_data.get("userReactions")
+            user_reactions = (
+                dict(stored_user_reactions)
+                if isinstance(stored_user_reactions, dict)
+                else {}
+            )
 
-            new_creator_score = current_creator_score + score_delta
+            stored_reactions = post_data.get("reactions")
+            reactions = (
+                dict(stored_reactions)
+                if isinstance(stored_reactions, dict)
+                else {}
+            )
 
-            # Both writes are performed together by the trusted backend.
+            # Preserve existing supported reaction counts.
+            for reaction_emoji in REACTION_POINTS:
+                try:
+                    reactions[reaction_emoji] = max(
+                        0, int(reactions.get(reaction_emoji, 0))
+                    )
+                except (TypeError, ValueError):
+                    reactions[reaction_emoji] = 0
+
+            old_emoji = user_reactions.get(reactor_uid)
+            new_emoji = payload.emoji
+
+            # Calculate only this user's score change.
+            old_points = REACTION_POINTS.get(old_emoji, 0)
+
+            if old_emoji == new_emoji:
+                # Clicking the same emoji removes the reaction.
+                user_reactions.pop(reactor_uid, None)
+                reactions[new_emoji] = max(0, reactions[new_emoji] - 1)
+                score_delta = -old_points
+                action = "removed"
+            else:
+                # Remove the user's previous reaction, if any.
+                if old_emoji in REACTION_POINTS:
+                    reactions[old_emoji] = max(
+                        0, reactions[old_emoji] - 1
+                    )
+
+                # Record the new reaction under the authenticated UID.
+                user_reactions[reactor_uid] = new_emoji
+                reactions[new_emoji] += 1
+
+                score_delta = (
+                    REACTION_POINTS[new_emoji] - old_points
+                )
+                action = "added" if old_emoji is None else "changed"
+
+            # Preserve the existing total and apply only the delta.
+            try:
+                post_score = int(post_data.get("creatorScore", 0) or 0)
+            except (TypeError, ValueError):
+                post_score = 0
+
+            try:
+                creator_score = int(
+                    creator_data.get("creatorScore", 0) or 0
+                )
+            except (TypeError, ValueError):
+                creator_score = 0
+
+            updated_post_score = post_score + score_delta
+            updated_creator_score = creator_score + score_delta
+
+            # Both writes happen in the same Firestore transaction.
             transaction.update(
                 post_ref,
                 {
                     "reactions": reactions,
                     "userReactions": user_reactions,
-                    "creatorScore": new_post_score,
+                    "creatorScore": updated_post_score,
                 },
             )
 
             transaction.update(
                 creator_ref,
                 {
-                    "creatorScore": new_creator_score,
+                    "creatorScore": updated_creator_score,
                 },
             )
 
             return {
+                "success": True,
+                "action": action,
                 "reactions": reactions,
                 "userReactions": user_reactions,
-                "postCreatorScore": new_post_score,
-                "creatorScore": new_creator_score,
+                "postCreatorScore": updated_post_score,
+                "creatorScore": updated_creator_score,
                 "scoreChange": score_delta,
             }
 
-        result = apply_reaction(transaction)
-
-        return {
-            "success": True,
-            **result,
-        }
+        return apply_reaction(transaction)
 
     except HTTPException:
         raise
-    except Exception as error:
+    except Exception as exc:
         print(
             "Reaction processing failed:",
-            type(error).__name__,
-            str(error),
+            type(exc).__name__,
+            str(exc),
         )
         raise HTTPException(
             status_code=500,
             detail="The reaction could not be saved. Please try again.",
-        ) from error
+        )
