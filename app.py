@@ -257,8 +257,12 @@ def award_creator_activity(
         )
 
     try:
-        decoded_token = auth.verify_id_token(id_token)
-        uid = decoded_token.get("uid")
+        firebase_app = get_firebase_admin()
+
+decoded_token = auth.verify_id_token(
+    id_token,
+    app=firebase_app,
+)
 
         if not uid:
             raise HTTPException(
