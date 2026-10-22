@@ -256,40 +256,34 @@ def award_creator_activity(
             detail="A valid sign-in token is required.",
         )
 
-    try:
+        try:
         firebase_app = get_firebase_admin()
 
-decoded_token = auth.verify_id_token(
-    id_token,
-    app=firebase_app,
-)
+        decoded_token = auth.verify_id_token(
+            id_token,
+            app=firebase_app,
+        )
+
+        uid = decoded_token.get("uid")
 
         if not uid:
             raise HTTPException(
                 status_code=401,
-                detail="The sign-in token is invalid.",
+                detail="Invalid authentication token.",
             )
 
     except HTTPException:
         raise
 
-    except Exception as error:
+    except Exception as exc:
         print(
-    "Creator-score authentication failed:",
-    type(error).__name__,
-    str(error),
-)
+            "Creator-score authentication failed:",
+            type(exc).__name__,
+            str(exc),
+        )
         raise HTTPException(
             status_code=401,
-            detail="Your session is invalid or has expired. Please sign in again.",
-        ) from error
-
-    activity_id = payload.activityId.strip()
-
-    if not activity_id:
-        raise HTTPException(
-            status_code=400,
-            detail="A valid activity ID is required.",
+            detail="Please sign in to continue.",
         )
 
     activity_type = payload.activityType
