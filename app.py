@@ -28,56 +28,63 @@ app.add_middleware(
 # FIREBASE ADMIN INITIALIZATION
 # --------------------------------------------------
 
+
 def get_firebase_admin():
-    if firebase_admin._apps:
+    """Return an initialized Firebase Admin app or initialize it safely."""
+    import json
+    import os
+    import firebase_admin
+    from firebase_admin import credentials
+
+    # Reuse the existing default app if initialization has succeeded.
+    try:
         return firebase_admin.get_app()
+    except ValueError:
+        pass
 
-    service_account_json = os.environ.get(
-        "FIREBASE_SERVICE_ACCOUNT_JSON"
-    )
-
+    service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     if not service_account_json:
-        raise HTTPException(
-            status_code=503,
-            detail="Firebase Admin is not configured.",
+        raise RuntimeError(
+            "FIREBASE_SERVICE_ACCOUNT_JSON is not configured."
         )
 
     try:
-        service_account = json.loads(service_account_json)
+        service_account_info = json.loads(service_account_json)
 
         required_fields = (
             "project_id",
             "client_email",
             "private_key",
         )
+        missing_fields = [
+            field for field in required_fields
+            if not service_account_info.get(field)
+        ]
+        if missing_fields:
+            raise RuntimeError(
+                "Firebase service account is missing required fields: "
+                + ", ".join(missing_fields)
+            )
 
-        if not all(service_account.get(key) for key in required_fields):
-            raise ValueError("Required service-account fields are missing.")
-
-        service_account["private_key"] = (
-            service_account["private_key"].replace("\\n", "\n")
+        # Render environment variables may store newlines as literal \n.
+        service_account_info["private_key"] = (
+            service_account_info["private_key"].replace("\\n", "\n")
         )
 
-        firebase_credential = credentials.Certificate(service_account)
+        certificate = credentials.Certificate(service_account_info)
 
-        return firebase_admin.initialize_app(firebase_credential)
+        # Return the app explicitly; do not rely on implicit initialization.
+        return firebase_admin.initialize_app(certificate)
 
-    except Exception as error:
+    except Exception as exc:
         print(
             "Firebase Admin initialization failed:",
-            type(error).__name__,
+            type(exc).__name__,
+            str(exc),
         )
-
-        raise HTTPException(
-            status_code=503,
-            detail="Firebase Admin initialization failed.",
-        ) from error
-
-
-def get_firestore():
-    get_firebase_admin()
-    return firestore.client()
-
+        raise RuntimeError(
+            "Firebase Admin could not be initialized."
+        ) from exc
 
 # --------------------------------------------------
 # HEALTH CHECK
