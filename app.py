@@ -1,3 +1,4 @@
+
 import hashlib
 import json
 import os
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="Inclura AI Backend",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 app.add_middleware(
@@ -28,21 +29,15 @@ app.add_middleware(
 # FIREBASE ADMIN INITIALIZATION
 # --------------------------------------------------
 
-
 def get_firebase_admin():
-    """Return an initialized Firebase Admin app or initialize it safely."""
-    import json
-    import os
-    import firebase_admin
-    from firebase_admin import credentials
-
-    # Reuse the existing default app if initialization has succeeded.
+    """Return the existing Firebase app or initialize it once."""
     try:
         return firebase_admin.get_app()
     except ValueError:
         pass
 
     service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+
     if not service_account_json:
         raise RuntimeError(
             "FIREBASE_SERVICE_ACCOUNT_JSON is not configured."
@@ -56,24 +51,25 @@ def get_firebase_admin():
             "client_email",
             "private_key",
         )
+
         missing_fields = [
-            field for field in required_fields
+            field
+            for field in required_fields
             if not service_account_info.get(field)
         ]
+
         if missing_fields:
             raise RuntimeError(
                 "Firebase service account is missing required fields: "
                 + ", ".join(missing_fields)
             )
 
-        # Render environment variables may store newlines as literal \n.
         service_account_info["private_key"] = (
             service_account_info["private_key"].replace("\\n", "\n")
         )
 
         certificate = credentials.Certificate(service_account_info)
 
-        # Return the app explicitly; do not rely on implicit initialization.
         return firebase_admin.initialize_app(certificate)
 
     except Exception as exc:
@@ -86,6 +82,65 @@ def get_firebase_admin():
             "Firebase Admin could not be initialized."
         ) from exc
 
+
+def get_firestore():
+    """Return a Firestore client associated with the initialized app."""
+    firebase_app = get_firebase_admin()
+    return firestore.client(app=firebase_app)
+
+
+def verify_bearer_token(authorization):
+    """Validate a Firebase ID token and return its authenticated UID."""
+    if (
+        not authorization
+        or not authorization.startswith("Bearer ")
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Please sign in to continue.",
+        )
+
+    id_token = authorization[7:].strip()
+
+    if not id_token:
+        raise HTTPException(
+            status_code=401,
+            detail="A valid sign-in token is required.",
+        )
+
+    try:
+        firebase_app = get_firebase_admin()
+
+        decoded_token = auth.verify_id_token(
+            id_token,
+            app=firebase_app,
+        )
+
+        uid = decoded_token.get("uid")
+
+        if not uid:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token.",
+            )
+
+        return uid
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print(
+            "Firebase token verification failed:",
+            type(exc).__name__,
+            str(exc),
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Please sign in again.",
+        ) from exc
+
+
 # --------------------------------------------------
 # HEALTH CHECK
 # --------------------------------------------------
@@ -94,12 +149,14 @@ def get_firebase_admin():
 def home():
     return {
         "status": "Inclura AI Backend Running",
+        "version": "1.2.0",
         "creatorScoring": "available",
+        "postReactions": "available",
     }
 
 
 # --------------------------------------------------
-# CREATOR-SCORE REQUEST MODEL
+# CREATOR ACTIVITY SCORING
 # --------------------------------------------------
 
 class CreatorScoreRequest(BaseModel):
@@ -139,10 +196,6 @@ OWNER_FIELDS = (
 )
 
 
-# --------------------------------------------------
-# ACTIVITY OWNERSHIP AND VALIDATION
-# --------------------------------------------------
-
 def find_activity_owner(data):
     owners = []
 
@@ -181,20 +234,19 @@ def find_activity_owner(data):
 
 
 def activity_matches_type(data, activity_type):
+    media_type = str(data.get("mediaType", "")).lower()
+    post_type = str(data.get("type", "")).lower()
+
+    has_video = (
+        bool(data.get("videoUrl"))
+        or media_type == "video"
+        or post_type == "video"
+    )
+
     if activity_type == "video_post":
-        return (
-            bool(data.get("videoUrl"))
-            or str(data.get("mediaType", "")).lower() == "video"
-            or str(data.get("type", "")).lower() == "video"
-        )
+        return has_video
 
     if activity_type == "text_post":
-        has_video = (
-            bool(data.get("videoUrl"))
-            or str(data.get("mediaType", "")).lower() == "video"
-            or str(data.get("type", "")).lower() == "video"
-        )
-
         return isinstance(data.get("text"), str) and not has_video
 
     return True
@@ -216,13 +268,19 @@ def get_owned_activity(db, uid, activity_type, activity_id):
         if find_activity_owner(data) != uid:
             raise HTTPException(
                 status_code=403,
-                detail="You are not authorized to earn points for this activity.",
+                detail=(
+                    "You are not authorized to earn points "
+                    "for this activity."
+                ),
             )
 
         if not activity_matches_type(data, activity_type):
             raise HTTPException(
                 status_code=400,
-                detail="The activity does not match the requested activity type.",
+                detail=(
+                    "The activity does not match the requested "
+                    "activity type."
+                ),
             )
 
         return collection_name
@@ -233,60 +291,15 @@ def get_owned_activity(db, uid, activity_type, activity_id):
     )
 
 
-# --------------------------------------------------
-# CREATOR-SCORE ENDPOINT
-# --------------------------------------------------
-
 @app.post("/api/creator-score/award")
 def award_creator_activity(
     payload: CreatorScoreRequest,
     authorization: str | None = Header(default=None),
 ):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Please sign in to continue.",
-        )
-
-    id_token = authorization[7:].strip()
-
-    if not id_token:
-        raise HTTPException(
-            status_code=401,
-            detail="A valid sign-in token is required.",
-        )
-
-        try:
-        firebase_app = get_firebase_admin()
-
-        decoded_token = auth.verify_id_token(
-            id_token,
-            app=firebase_app,
-        )
-
-        uid = decoded_token.get("uid")
-
-        if not uid:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid authentication token.",
-            )
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        print(
-            "Creator-score authentication failed:",
-            type(exc).__name__,
-            str(exc),
-        )
-        raise HTTPException(
-            status_code=401,
-            detail="Please sign in to continue.",
-        )
+    uid = verify_bearer_token(authorization)
 
     activity_type = payload.activityType
+    activity_id = payload.activityId
     points = ACTIVITY_POINTS[activity_type]
 
     try:
@@ -309,14 +322,6 @@ def award_creator_activity(
             db.collection("creatorActivityAwards")
             .document(award_id)
         )
-
-        user_snapshot = user_ref.get()
-
-        if not user_snapshot.exists:
-            raise HTTPException(
-                status_code=404,
-                detail="Your Inclura user profile could not be found.",
-            )
 
         transaction = db.transaction()
 
@@ -344,10 +349,7 @@ def award_creator_activity(
             elif not isinstance(economy, dict):
                 raise HTTPException(
                     status_code=409,
-                    detail=(
-                        "The stored creator economy data is invalid. "
-                        "The score was not changed."
-                    ),
+                    detail="The stored creator economy data is invalid.",
                 )
 
             current_score = economy.get("score", 0)
@@ -359,10 +361,7 @@ def award_creator_activity(
             ):
                 raise HTTPException(
                     status_code=409,
-                    detail=(
-                        "The stored creator score is invalid. "
-                        "The score was not changed."
-                    ),
+                    detail="The stored creator economy score is invalid.",
                 )
 
             if existing_award.exists:
@@ -427,27 +426,36 @@ def award_creator_activity(
     except HTTPException:
         raise
 
-    except Exception as error:
+    except Exception as exc:
         print(
             "Creator-score processing failed:",
-            type(error).__name__,
-            str(error),
+            type(exc).__name__,
+            str(exc),
         )
-
         raise HTTPException(
             status_code=500,
-            detail="Creator scoring could not be recorded. Please try again later.",
-        ) from error
+            detail=(
+                "Creator scoring could not be recorded. "
+                "Please try again later."
+            ),
+        ) from exc
+
 
 # --------------------------------------------------
-# AUTHENTICATED POST REACTIONS AND CREATOR ENGAGEMENT
+# AUTHENTICATED POST REACTIONS
 # --------------------------------------------------
-
-
-# AUTHENTICATED POST REACTIONS AND CREATOR ENGAGEMENT
 
 class PostReactionRequest(BaseModel):
-    emoji: Literal["❤️", "👏", "😊", "👍", "😂", "😮", "😢", "👎"]
+    emoji: Literal[
+        "❤️",
+        "👏",
+        "😊",
+        "👍",
+        "😂",
+        "😮",
+        "😢",
+        "👎",
+    ]
 
 
 REACTION_POINTS = {
@@ -468,33 +476,19 @@ def react_to_post(
     payload: PostReactionRequest,
     authorization: str | None = Header(default=None),
 ):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Please sign in to react to a post.",
-        )
+    reactor_uid = verify_bearer_token(authorization)
 
     try:
-        firebase_app = get_firebase_admin()
-        decoded_token = auth.verify_id_token(
-            authorization.split(" ", 1)[1],
-            app=firebase_app,
-        )
-        reactor_uid = decoded_token.get("uid")
-
-        if not reactor_uid:
-            raise HTTPException(
-                status_code=401,
-                detail="Unable to verify your account.",
-            )
-
         db = get_firestore()
+
         post_ref = db.collection("posts").document(post_id)
         transaction = db.transaction()
 
         @firestore.transactional
         def apply_reaction(transaction):
-            post_snapshot = post_ref.get(transaction=transaction)
+            post_snapshot = post_ref.get(
+                transaction=transaction
+            )
 
             if not post_snapshot.exists:
                 raise HTTPException(
@@ -505,7 +499,7 @@ def react_to_post(
             post_data = post_snapshot.to_dict() or {}
             creator_uid = post_data.get("userId")
 
-            if not creator_uid:
+            if not isinstance(creator_uid, str) or not creator_uid:
                 raise HTTPException(
                     status_code=400,
                     detail="This post has no valid creator ID.",
@@ -514,11 +508,17 @@ def react_to_post(
             if creator_uid == reactor_uid:
                 raise HTTPException(
                     status_code=403,
-                    detail="You cannot earn engagement points by reacting to your own post.",
+                    detail=(
+                        "You cannot earn engagement points "
+                        "by reacting to your own post."
+                    ),
                 )
 
             creator_ref = db.collection("users").document(creator_uid)
-            creator_snapshot = creator_ref.get(transaction=transaction)
+
+            creator_snapshot = creator_ref.get(
+                transaction=transaction
+            )
 
             if not creator_snapshot.exists:
                 raise HTTPException(
@@ -528,7 +528,6 @@ def react_to_post(
 
             creator_data = creator_snapshot.to_dict() or {}
 
-            # Keep the per-user reaction record authoritative.
             stored_user_reactions = post_data.get("userReactions")
             user_reactions = (
                 dict(stored_user_reactions)
@@ -543,60 +542,63 @@ def react_to_post(
                 else {}
             )
 
-            # Preserve existing supported reaction counts.
-            for reaction_emoji in REACTION_POINTS:
+            # Normalize reaction counts without discarding other fields.
+            for emoji in REACTION_POINTS:
                 try:
-                    reactions[reaction_emoji] = max(
-                        0, int(reactions.get(reaction_emoji, 0))
-                    )
+                    count = int(reactions.get(emoji, 0))
+                    reactions[emoji] = max(0, count)
                 except (TypeError, ValueError):
-                    reactions[reaction_emoji] = 0
+                    reactions[emoji] = 0
 
             old_emoji = user_reactions.get(reactor_uid)
             new_emoji = payload.emoji
-
-            # Calculate only this user's score change.
             old_points = REACTION_POINTS.get(old_emoji, 0)
 
             if old_emoji == new_emoji:
-                # Clicking the same emoji removes the reaction.
+                # Same emoji clicked again: remove this user's reaction.
                 user_reactions.pop(reactor_uid, None)
-                reactions[new_emoji] = max(0, reactions[new_emoji] - 1)
+                reactions[new_emoji] = max(
+                    0,
+                    reactions[new_emoji] - 1,
+                )
                 score_delta = -old_points
                 action = "removed"
+
             else:
-                # Remove the user's previous reaction, if any.
+                # Change the user's previous reaction, if there was one.
                 if old_emoji in REACTION_POINTS:
                     reactions[old_emoji] = max(
-                        0, reactions[old_emoji] - 1
+                        0,
+                        reactions[old_emoji] - 1,
                     )
 
-                # Record the new reaction under the authenticated UID.
                 user_reactions[reactor_uid] = new_emoji
                 reactions[new_emoji] += 1
 
                 score_delta = (
                     REACTION_POINTS[new_emoji] - old_points
                 )
+
                 action = "added" if old_emoji is None else "changed"
 
-            # Preserve the existing total and apply only the delta.
             try:
-                post_score = int(post_data.get("creatorScore", 0) or 0)
-            except (TypeError, ValueError):
-                post_score = 0
-
-            try:
+                post_score = int(
+                    post_data.get("creatorScore", 0) or 0
+                )
                 creator_score = int(
                     creator_data.get("creatorScore", 0) or 0
                 )
             except (TypeError, ValueError):
-                creator_score = 0
+                raise HTTPException(
+                    status_code=409,
+                    detail="The stored engagement score is invalid.",
+                )
 
             updated_post_score = post_score + score_delta
             updated_creator_score = creator_score + score_delta
 
-            # Both writes happen in the same Firestore transaction.
+            # Update post reaction state and creator engagement score
+            # atomically, using the authenticated reactor UID.
             transaction.update(
                 post_ref,
                 {
@@ -627,6 +629,7 @@ def react_to_post(
 
     except HTTPException:
         raise
+
     except Exception as exc:
         print(
             "Reaction processing failed:",
@@ -636,4 +639,5 @@ def react_to_post(
         raise HTTPException(
             status_code=500,
             detail="The reaction could not be saved. Please try again.",
-        )
+        ) from exc
+
