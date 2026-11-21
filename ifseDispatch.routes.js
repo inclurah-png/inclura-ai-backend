@@ -20,51 +20,68 @@ function resolveRuleId(emergencyData) {
 async function alertAdministrators(db, emergencyId, emergency, ruleId) {
   const now = new Date();
   const auditRef = db.collection("ifseAuditLogs").doc("sos_received_" + emergencyId);
-  await auditRef.set({
-    module: "SOS",
-    ifseGenerated: true,
-    action: "SOS_RECEIVED",
-    emergencyId,
-    actor: "IFSE System",
-    description: "A member submitted an SOS. Administrator alert generated automatically; no approval is required.",
-    emergencyType: emergency.emergencyType || "",
-    priority: emergency.priority || "Unspecified",
-    gpsLatitude: Number(emergency.gpsLatitude) || 0,
-    gpsLongitude: Number(emergency.gpsLongitude) || 0,
-    dispatchStatus: "Dispatch attempt pending",
-    ruleDocumentId: ruleId || "",
-    createdAt: now,
-    updatedAt: now
-  });
+  let administratorsAlerted = 0;
+  let auditRecorded = false;
+  let alertError = "";
 
-  const auth = getFirebaseAuth();
-  const admins = [];
-  let pageToken;
-  do {
-    const page = await auth.listUsers(1000, pageToken);
-    for (const user of page.users) {
-      if (user.customClaims && user.customClaims.admin === true) admins.push(user.uid);
-    }
-    pageToken = page.pageToken;
-  } while (pageToken);
-
-  const batch = db.batch();
-  for (const adminUid of admins) {
-    const notificationRef = db.collection("notifications").doc(emergencyId + "_admin_" + adminUid);
-    batch.set(notificationRef, {
-      receiverId: adminUid,
-      senderId: "system",
-      type: "emergency_sos",
-      category: "SOS",
-      title: "New emergency SOS received",
-      message: "An SOS request has been recorded. Emergency ID: " + emergencyId + ". Priority: " + String(emergency.priority || "Unspecified") + ". Review the emergency record; no approval action is required.",
+  // Archive failure or administrator-notification failure must never block dispatch.
+  try {
+    await auditRef.set({
+      module: "SOS",
+      ifseGenerated: true,
+      action: "SOS_RECEIVED",
       emergencyId,
-      read: false,
-      createdAt: now
-    });
+      actor: "IFSE System",
+      description: "A member submitted an SOS. Administrator alert generated automatically; no approval is required.",
+      emergencyType: emergency.emergencyType || "",
+      priority: emergency.priority || "Unspecified",
+      gpsLatitude: Number(emergency.gpsLatitude) || 0,
+      gpsLongitude: Number(emergency.gpsLongitude) || 0,
+      dispatchStatus: "Dispatch attempt pending",
+      ruleDocumentId: ruleId || "",
+      createdAt: now,
+      updatedAt: now
+    }, { merge: true });
+    auditRecorded = true;
+  } catch (error) {
+    console.error("SOS receipt audit could not be recorded:", error.message);
   }
-  if (admins.length) await batch.commit();
-  return { auditId: auditRef.id, administratorsAlerted: admins.length };
+
+  try {
+    const auth = getFirebaseAuth();
+    const admins = [];
+    let pageToken;
+    do {
+      const page = await auth.listUsers(1000, pageToken);
+      for (const user of page.users) {
+        if (user.customClaims && user.customClaims.admin === true) admins.push(user.uid);
+      }
+      pageToken = page.pageToken;
+    } while (pageToken);
+
+    const batch = db.batch();
+    for (const adminUid of admins) {
+      const notificationRef = db.collection("notifications").doc(emergencyId + "_admin_" + adminUid);
+      batch.set(notificationRef, {
+        receiverId: adminUid,
+        senderId: "system",
+        type: "emergency_sos",
+        category: "SOS",
+        title: "New emergency SOS received",
+        message: "An SOS request has been recorded. Emergency ID: " + emergencyId + ". Priority: " + String(emergency.priority || "Unspecified") + ". Review the emergency record; no approval action is required.",
+        emergencyId,
+        read: false,
+        createdAt: now
+      }, { merge: true });
+    }
+    if (admins.length) await batch.commit();
+    administratorsAlerted = admins.length;
+  } catch (error) {
+    alertError = "Administrator in-app alert could not be delivered.";
+    console.error("SOS administrator alert failed:", error.message);
+  }
+
+  return { auditId: auditRef.id, auditRecorded, administratorsAlerted, alertError };
 }
 
 async function resolveAgency(db, identifier) {
