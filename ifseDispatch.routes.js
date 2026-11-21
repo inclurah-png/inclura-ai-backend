@@ -54,7 +54,7 @@ async function alertAdministrators(db, emergencyId, emergency, ruleId) {
     do {
       const page = await auth.listUsers(1000, pageToken);
       for (const user of page.users) {
-        if (user.customClaims && user.customClaims.admin === true) admins.push(user.uid);
+        if (user.customClaims && (user.customClaims.admin === true || user.customClaims.sosNotificationOnly === true)) admins.push(user.uid);
       }
       pageToken = page.pageToken;
     } while (pageToken);
