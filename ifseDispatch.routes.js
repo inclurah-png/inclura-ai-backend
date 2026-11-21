@@ -1,5 +1,5 @@
 const express = require("express");
-const { getFirestore } = require("./firebaseAdmin");
+const { getFirestore, getFirebaseAuth } = require("./firebaseAdmin");
 const firebaseAuthMiddleware = require("./firebaseAuth.middleware");
 
 const router = express.Router();
@@ -15,6 +15,56 @@ function resolveRuleId(emergencyData) {
   if (/police|missing person|theft|robbery|burglary|crime|assault|domestic violence|violent crime/i.test(text)) return "POLICE";
   if (/kidnap|kidnapping|hostage|armed|weapon|gun|shooting|terror|terrorist|attack|armed intrusion|security threat|violent attack|invasion/i.test(text)) return "ARMED_ATTACK";
   return "POLICE";
+}
+
+async function alertAdministrators(db, emergencyId, emergency, ruleId) {
+  const now = new Date();
+  const auditRef = db.collection("ifseAuditLogs").doc();
+  await auditRef.set({
+    module: "SOS",
+    ifseGenerated: true,
+    action: "SOS_RECEIVED",
+    emergencyId,
+    actor: "IFSE System",
+    description: "A member submitted an SOS. Administrator alert generated automatically; no approval is required.",
+    emergencyType: emergency.emergencyType || "",
+    priority: emergency.priority || "Unspecified",
+    gpsLatitude: Number(emergency.gpsLatitude) || 0,
+    gpsLongitude: Number(emergency.gpsLongitude) || 0,
+    dispatchStatus: "Dispatch attempt pending",
+    ruleDocumentId: ruleId || "",
+    createdAt: now,
+    updatedAt: now
+  });
+
+  const auth = getFirebaseAuth();
+  const admins = [];
+  let pageToken;
+  do {
+    const page = await auth.listUsers(1000, pageToken);
+    for (const user of page.users) {
+      if (user.customClaims && user.customClaims.admin === true) admins.push(user.uid);
+    }
+    pageToken = page.pageToken;
+  } while (pageToken);
+
+  const batch = db.batch();
+  for (const adminUid of admins) {
+    const notificationRef = db.collection("notifications").doc();
+    batch.set(notificationRef, {
+      receiverId: adminUid,
+      senderId: "system",
+      type: "emergency_sos",
+      category: "SOS",
+      title: "New emergency SOS received",
+      message: "An SOS request has been recorded. Emergency ID: " + emergencyId + ". Priority: " + String(emergency.priority || "Unspecified") + ". Review the emergency record; no approval action is required.",
+      emergencyId,
+      read: false,
+      createdAt: now
+    });
+  }
+  if (admins.length) await batch.commit();
+  return { auditId: auditRef.id, administratorsAlerted: admins.length };
 }
 
 async function resolveAgency(db, identifier) {
@@ -56,7 +106,6 @@ async function resolveAgency(db, identifier) {
 }
 
 router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) => {
-  const db = getFirestore();
   const uid = req.firebaseUser?.uid;
   const emergencyId = String(req.params.emergencyId || "").trim();
 
@@ -65,6 +114,7 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
   }
 
   try {
+    const db = getFirestore();
     const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
     const emergencySnap = await emergencyRef.get();
 
@@ -79,6 +129,7 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
     }
 
     const ruleId = resolveRuleId(emergency);
+    const adminAlert = await alertAdministrators(db, emergencyId, emergency, ruleId);
     const ruleSnap = await db.collection("emergencyResponseRules").doc(ruleId).get();
 
     if (!ruleSnap.exists) {
@@ -250,12 +301,15 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
       responderName,
       responderId: responder.id,
       assignmentStatus: "Pending",
+      administratorAlert: adminAlert,
       message: "IFSE responder assignment created. Responder acceptance and arrival are not yet confirmed.",
     });
   } catch (error) {
     console.error("IFSE server dispatch failed:", error);
     return res.status(500).json({
       success: false,
+      emergencyRecorded: true,
+      administratorAlertAttempted: true,
       message: error?.message || "IFSE dispatch failed.",
     });
   }
