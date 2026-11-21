@@ -174,7 +174,21 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
       responderData.username ||
       "Emergency Response Team";
 
-    const assignmentRef = db.collection("emergencyAssignments").doc(`${emergencyId}_${responder.id}`);\n    const existingAssignment = await assignmentRef.get();\n    if (existingAssignment.exists) {\n      return res.status(200).json({\n        success: true,\n        emergencyId,\n        escalationId: "",\n        agency: existingAssignment.data().responderAgency || primaryAgency.agencyName,\n        responderName: existingAssignment.data().responderName || "Assigned responder",\n        responderId: responder.id,\n        assignmentStatus: existingAssignment.data().assignmentStatus || "Pending",\n        administratorAlert: adminAlert,\n        message: "An IFSE responder assignment already exists. No duplicate assignment was created."\n      });\n    }
+    const assignmentRef = db.collection("emergencyAssignments").doc(`${emergencyId}_${responder.id}`);
+    const existingAssignment = await assignmentRef.get();
+    if (existingAssignment.exists) {
+      return res.status(200).json({
+        success: true,
+        emergencyId,
+        escalationId: "",
+        agency: existingAssignment.data().responderAgency || primaryAgency.agencyName,
+        responderName: existingAssignment.data().responderName || "Assigned responder",
+        responderId: responder.id,
+        assignmentStatus: existingAssignment.data().assignmentStatus || "Pending",
+        administratorAlert: adminAlert,
+        message: "An IFSE responder assignment already exists. No duplicate assignment was created."
+      });
+    }
     const now = new Date();
 
     const assignment = {
