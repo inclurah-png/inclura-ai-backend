@@ -38,6 +38,7 @@ const notificationRoutes = require("./routes/notification.routes");
 
 const creatorScoreRoutes = require("./creatorScore.routes");
 const postReactionRoutes = require("./postReactions.routes");
+const sosNotificationsRoutes = require("./sosNotifications.routes");
 
 const authMiddleware = require("./auth.middleware");
 const errorMiddleware = require("./error.middleware");
@@ -87,6 +88,7 @@ app.use("/api/auth", authRoutes);
 // JWT-protected MongoDB post router.
 app.use("/api/posts", postReactionRoutes);
 app.use("/api/creator-score", creatorScoreRoutes);
+app.use("/api/sos-notifications", sosNotificationsRoutes);
 
 // Existing protected routes
 app.use("/api/users", authMiddleware, userRoutes);
