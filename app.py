@@ -89,6 +89,58 @@ def get_firestore():
     return firestore.client(app=firebase_app)
 
 
+@app.post("/api/sos-notification-access/activate")
+def activate_sos_notification_only_access(
+    authorization: str | None = Header(default=None),
+):
+    """Grant read-only SOS notification access only to a pre-approved email."""
+    uid = verify_bearer_token(authorization)
+    configured_emails = {
+        item.strip().lower()
+        for item in os.getenv("SOS_NOTIFICATION_ONLY_EMAILS", "").split(",")
+        if item.strip()
+    }
+    if not configured_emails:
+        raise HTTPException(
+            status_code=503,
+            detail="SOS notification-only account allowlist is not configured.",
+        )
+
+    try:
+        firebase_app = get_firebase_admin()
+        account = auth.get_user(uid, app=firebase_app)
+        account_email = (account.email or "").strip().lower()
+        if not account_email or account_email not in configured_emails:
+            raise HTTPException(
+                status_code=403,
+                detail="This signed-in account is not approved for SOS notification-only access.",
+            )
+
+        claims = dict(account.custom_claims or {})
+        if claims.get("admin") is True:
+            return {
+                "success": True,
+                "role": "administrator",
+                "message": "Existing administrator access is unchanged.",
+            }
+
+        claims["sosNotificationOnly"] = True
+        auth.set_custom_user_claims(uid, claims, app=firebase_app)
+        return {
+            "success": True,
+            "role": "sosNotificationOnly",
+            "message": "Read-only SOS notification access has been activated. Sign in again to refresh permissions.",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("SOS notification-only activation failed:", type(exc).__name__, str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="SOS notification-only access could not be activated.",
+        ) from exc
+
+
 def verify_bearer_token(authorization):
     """Validate a Firebase ID token and return its authenticated UID."""
     if (
