@@ -30,5 +30,6 @@ jobs:
           assert "/api/ifse-dispatch/{emergency_id}/dispatch" in paths
           assert "/api/creator-score/award" in paths
           assert "/api/posts/{post_id}/react" in paths
+          assert "/api/sos-notifications/{emergency_id}/send" in paths
           print("Backend routes loaded successfully.")
           PY
