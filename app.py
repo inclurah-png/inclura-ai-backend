@@ -641,3 +641,443 @@ def react_to_post(
             detail="The reaction could not be saved. Please try again.",
         ) from exc
 
+
+
+# --------------------------------------------------
+# AUTOMATIC IFSE SOS DISPATCH + NOTIFICATION-ONLY ADMIN ALERTS
+# --------------------------------------------------
+
+import re
+
+
+def classify_emergency(emergency):
+    text = (
+        str(emergency.get("emergencyType") or "")
+        + " "
+        + str(emergency.get("description") or "")
+    ).strip().lower()
+
+    patterns = [
+        ("MEDICAL", r"medical|injury|injured|unconscious|bleeding|heart attack|stroke|ambulance|illness|overdose|pregnan"),
+        ("FIRE", r"fire|smoke|burning|flame|explosion|building fire"),
+        ("FLOOD", r"flood|flooding|landslide|earthquake|building collapse|collapse|natural disaster|storm|disaster"),
+        ("POLICE", r"police|missing person|theft|robbery|burglary|crime|assault|domestic violence|violent crime"),
+        ("ARMED_ATTACK", r"kidnap|kidnapping|hostage|armed|weapon|gun|shooting|terror|terrorist|attack|armed intrusion|security threat|violent attack|invasion"),
+    ]
+
+    for rule_id, pattern in patterns:
+        if re.search(pattern, text):
+            return rule_id
+    return "POLICE"
+
+
+def record_sos_receipt_and_notify(db, emergency_id, emergency, rule_id):
+    """Record SOS and notify designated accounts; never gate or control dispatch."""
+    now = firestore.SERVER_TIMESTAMP
+    audit_ref = db.collection("ifseAuditLogs").document(
+        f"sos_received_{emergency_id}"
+    )
+    audit_recorded = False
+    alert_count = 0
+    alert_error = ""
+
+    try:
+        audit_ref.set({
+            "module": "SOS",
+            "ifseGenerated": True,
+            "action": "SOS_RECEIVED",
+            "emergencyId": emergency_id,
+            "actor": "IFSE System",
+            "description": (
+                "A member submitted an SOS. Administrator notification "
+                "was generated automatically; no approval is required."
+            ),
+            "emergencyType": emergency.get("emergencyType") or "",
+            "priority": emergency.get("priority") or "Unspecified",
+            "gpsLatitude": float(emergency.get("gpsLatitude") or 0),
+            "gpsLongitude": float(emergency.get("gpsLongitude") or 0),
+            "dispatchStatus": "Dispatch attempt pending",
+            "ruleDocumentId": rule_id or "",
+            "createdAt": now,
+            "updatedAt": now,
+        }, merge=True)
+        audit_recorded = True
+    except Exception as exc:
+        print("SOS receipt audit failed:", type(exc).__name__, str(exc))
+
+    try:
+        firebase_app = get_firebase_admin()
+        recipients = []
+        page_token = None
+
+        while True:
+            page = auth.list_users(
+                max_results=1000,
+                page_token=page_token,
+                app=firebase_app,
+            )
+            for account in page.users:
+                claims = account.custom_claims or {}
+                if (
+                    claims.get("admin") is True
+                    or claims.get("sosNotificationOnly") is True
+                ):
+                    recipients.append(account.uid)
+            page_token = page.next_page_token
+            if not page_token:
+                break
+
+        batch = db.batch()
+        for recipient_uid in recipients:
+            notification_ref = (
+                db.collection("notifications")
+                .document(f"{emergency_id}_admin_{recipient_uid}")
+            )
+            batch.set(notification_ref, {
+                "receiverId": recipient_uid,
+                "senderId": "system",
+                "type": "emergency_sos",
+                "category": "SOS",
+                "title": "New emergency SOS received",
+                "message": (
+                    f"An SOS request has been recorded. Emergency ID: "
+                    f"{emergency_id}. Priority: "
+                    f"{emergency.get('priority') or 'Unspecified'}. "
+                    "This is an informational alert; no approval action is required."
+                ),
+                "emergencyId": emergency_id,
+                "read": False,
+                "createdAt": now,
+            }, merge=True)
+
+        if recipients:
+            batch.commit()
+        alert_count = len(recipients)
+    except Exception as exc:
+        alert_error = "Administrator in-app alert could not be delivered."
+        print("SOS administrator alert failed:", type(exc).__name__, str(exc))
+
+    return {
+        "auditId": audit_ref.id,
+        "auditRecorded": audit_recorded,
+        "administratorsAlerted": alert_count,
+        "alertError": alert_error,
+    }
+
+
+def resolve_ifse_agency(db, identifier):
+    requested = str(identifier or "").strip()
+    if not requested:
+        raise RuntimeError("The IFSE rule has no primary agency.")
+
+    snapshot = (
+        db.collection("ifseAgencyRegistry")
+        .where("agencyCode", "==", requested)
+        .limit(1)
+        .get()
+    )
+    if not snapshot:
+        snapshot = (
+            db.collection("ifseAgencyRegistry")
+            .where("agencyName", "==", requested)
+            .limit(1)
+            .get()
+        )
+    if not snapshot:
+        raise RuntimeError(f'IFSE agency "{requested}" was not found.')
+
+    agency = snapshot[0].to_dict() or {}
+    if agency.get("active") is not True:
+        raise RuntimeError(f'IFSE agency "{requested}" is inactive.')
+    if agency.get("governmentAuthorized") is not True:
+        raise RuntimeError(f'IFSE agency "{requested}" is not government authorized.')
+    if not agency.get("responderCollection"):
+        raise RuntimeError(f'IFSE agency "{requested}" has no responder collection configured.')
+
+    return {
+        "id": snapshot[0].id,
+        "agencyName": agency.get("agencyName") or "",
+        "agencyCode": agency.get("agencyCode") or "",
+        "responderCollection": agency["responderCollection"],
+        "agencyType": agency.get("agencyType") or "",
+        "ifseVerifiedRequired": agency.get("ifseVerifiedRequired") is True,
+    }
+
+
+@app.post("/api/ifse-dispatch/{emergency_id}/dispatch")
+def dispatch_ifse_emergency(
+    emergency_id: str,
+    authorization: str | None = Header(default=None),
+):
+    uid = verify_bearer_token(authorization)
+    emergency_id = emergency_id.strip()
+    if not emergency_id:
+        raise HTTPException(status_code=400, detail="An emergency ID is required.")
+
+    db = get_firestore()
+    emergency_ref = db.collection("emergencySOS").document(emergency_id)
+    emergency_snapshot = emergency_ref.get()
+
+    if not emergency_snapshot.exists:
+        raise HTTPException(status_code=404, detail="Emergency record was not found.")
+
+    emergency = emergency_snapshot.to_dict() or {}
+    if emergency.get("userId") != uid:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorized to dispatch this emergency.",
+        )
+
+    rule_id = classify_emergency(emergency)
+    admin_alert = record_sos_receipt_and_notify(
+        db, emergency_id, emergency, rule_id
+    )
+
+    try:
+        rule_snapshot = (
+            db.collection("emergencyResponseRules")
+            .document(rule_id)
+            .get()
+        )
+        if not rule_snapshot.exists:
+            raise RuntimeError(f'IFSE authoritative rule "{rule_id}" was not found.')
+
+        rule = rule_snapshot.to_dict() or {}
+        if rule.get("active") is not True:
+            raise RuntimeError(f'IFSE authoritative rule "{rule_id}" is inactive.')
+        if not rule.get("primaryAgency"):
+            raise RuntimeError("IFSE authoritative rule has no primary agency.")
+
+        agency = resolve_ifse_agency(db, rule.get("primaryAgency"))
+        responder_snapshot = (
+            db.collection(agency["responderCollection"]).get()
+        )
+        eligible = []
+        for responder_doc in responder_snapshot:
+            responder_data = responder_doc.to_dict() or {}
+            verified_for_agency = (
+                responder_data.get("ifseVerified") is True
+                if agency["ifseVerifiedRequired"]
+                else True
+            )
+            if (
+                responder_data.get("available") is True
+                and responder_data.get("onDuty") is True
+                and responder_data.get("verified") is True
+                and verified_for_agency
+                and responder_data.get("suspended") is not True
+            ):
+                eligible.append((responder_doc, responder_data))
+
+        if not eligible:
+            raise RuntimeError(
+                f"No eligible responder found in {agency['responderCollection']}."
+            )
+
+        responder_doc, responder_data = eligible[0]
+        responder_name = (
+            responder_data.get("fullName")
+            or responder_data.get("displayName")
+            or responder_data.get("name")
+            or responder_data.get("username")
+            or "Emergency Response Team"
+        )
+
+        assignment_id = f"{emergency_id}_{responder_doc.id}"
+        assignment_ref = (
+            db.collection("emergencyAssignments").document(assignment_id)
+        )
+        existing_assignment = assignment_ref.get()
+        if existing_assignment.exists:
+            existing = existing_assignment.to_dict() or {}
+            return {
+                "success": True,
+                "emergencyId": emergency_id,
+                "escalationId": "",
+                "agency": existing.get("responderAgency") or agency["agencyName"],
+                "responderName": existing.get("responderName") or "Assigned responder",
+                "responderId": responder_doc.id,
+                "assignmentStatus": existing.get("assignmentStatus") or "Pending",
+                "administratorAlert": admin_alert,
+                "message": (
+                    "An IFSE responder assignment already exists. "
+                    "No duplicate assignment was created."
+                ),
+            }
+
+        now = firestore.SERVER_TIMESTAMP
+        escalation_query = (
+            db.collection("emergencyEscalationQueue")
+            .where("emergencyId", "==", emergency_id)
+            .limit(1)
+            .get()
+        )
+        if escalation_query:
+            escalation_id = escalation_query[0].id
+        else:
+            escalation_ref = db.collection("emergencyEscalationQueue").document()
+            escalation_ref.set({
+                "emergencyId": emergency_id,
+                "emergencyType": emergency.get("emergencyType") or "",
+                "priority": emergency.get("priority") or rule.get("priority") or "Low",
+                "ruleDocumentId": rule_id,
+                "primaryAgency": rule.get("primaryAgency") or "",
+                "secondaryAgency": rule.get("secondaryAgency") or "",
+                "tertiaryAgency": rule.get("tertiaryAgency") or "",
+                "escalationMinutes": int(rule.get("escalationMinutes") or 0),
+                "escalationLevel": 0,
+                "waitingForAcceptance": True,
+                "accepted": False,
+                "acceptedAt": None,
+                "governmentEscalated": False,
+                "paramilitaryEscalated": False,
+                "militaryEscalated": False,
+                "satelliteActivated": False,
+                "status": "Waiting",
+                "createdAt": now,
+                "updatedAt": now,
+            })
+            escalation_id = escalation_ref.id
+
+        assignment = {
+            "assignmentId": assignment_id,
+            "emergencyId": emergency_id,
+            "responderId": responder_doc.id,
+            "responderName": responder_name,
+            "responderAgency": agency["agencyName"],
+            "responderAgencyCode": agency["agencyCode"],
+            "responderAgencyType": agency["agencyType"],
+            "responderCollection": agency["responderCollection"],
+            "responderType": responder_data.get("responderType") or "Government",
+            "assignedBy": "IFSE Auto Dispatch",
+            "assignmentStatus": "Pending",
+            "accepted": False,
+            "acceptedAt": None,
+            "arrived": False,
+            "arrivedAt": None,
+            "completed": False,
+            "completedAt": None,
+            "cancelled": False,
+            "cancellationReason": "",
+            "escalationLevel": 0,
+            "dispatchPriority": emergency.get("priority") or rule.get("priority") or "Low",
+            "estimatedArrivalMinutes": int(rule.get("estimatedArrivalMinutes") or 0),
+            "actualArrivalMinutes": 0,
+            "satelliteDispatch": False,
+            "automaticAssignment": True,
+            "manualOverride": False,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+
+        batch = db.batch()
+        batch.create(assignment_ref, assignment)
+        batch.update(emergency_ref, {
+            "status": "assigned",
+            "assignedResponder": responder_name,
+            "assignedResponderId": responder_doc.id,
+            "assignedAgency": agency["agencyName"],
+            "assignedAgencyCode": agency["agencyCode"],
+            "assignedAgencyType": agency["agencyType"],
+            "responderCollection": agency["responderCollection"],
+            "responseStatus": "Awaiting Responder Acceptance",
+            "assignmentStatus": "Pending",
+            "incidentStatus": "Responder Assigned",
+            "ifseClassification": rule_id,
+            "updatedAt": now,
+        })
+        timeline_ref = db.collection("emergencyTimeline").document()
+        batch.set(timeline_ref, {
+            "timelineId": f"{emergency_id}_001",
+            "emergencyId": emergency_id,
+            "eventType": "Responder Assigned",
+            "eventDescription": (
+                f"{agency['agencyName'] or 'Authorized agency'} responder "
+                "assigned automatically by IFSE."
+            ),
+            "performedBy": "IFSE Dispatch Engine",
+            "performerType": "System",
+            "responderId": responder_doc.id,
+            "responderAgency": agency["agencyName"],
+            "responderAgencyCode": agency["agencyCode"],
+            "responderAgencyType": agency["agencyType"],
+            "responderName": responder_name,
+            "responderCollection": agency["responderCollection"],
+            "eventStatus": "Completed",
+            "latitude": float(emergency.get("gpsLatitude") or 0),
+            "longitude": float(emergency.get("gpsLongitude") or 0),
+            "satelliteMode": False,
+            "networkAvailable": True,
+            "offlineRecorded": False,
+            "severity": emergency.get("priority") or "Low",
+            "ifseThreatScore": 0,
+            "ifseClassification": rule_id,
+            "eventOrder": 1,
+            "visibleToFamily": True,
+            "visibleToGovernment": True,
+            "visibleToResponders": True,
+            "createdAt": now,
+            "updatedAt": now,
+        })
+        batch.commit()
+
+        db.collection("ifseAuditLogs").add({
+            "module": "SOS",
+            "ifseGenerated": True,
+            "action": "RESPONDER_ASSIGNED",
+            "emergencyId": emergency_id,
+            "actor": "IFSE System",
+            "description": (
+                "An eligible responder was assigned automatically. "
+                "Acceptance and arrival remain unconfirmed."
+            ),
+            "assignedAgency": agency["agencyName"],
+            "responderName": responder_name,
+            "escalationLevel": 0,
+            "escalationStatus": "Waiting for responder acceptance",
+            "gpsLatitude": float(emergency.get("gpsLatitude") or 0),
+            "gpsLongitude": float(emergency.get("gpsLongitude") or 0),
+            "createdAt": now,
+            "updatedAt": now,
+        })
+
+        return {
+            "success": True,
+            "emergencyId": emergency_id,
+            "escalationId": escalation_id,
+            "ruleDocumentId": rule_id,
+            "agency": agency["agencyName"],
+            "agencyCode": agency["agencyCode"],
+            "responderName": responder_name,
+            "responderId": responder_doc.id,
+            "assignmentStatus": "Pending",
+            "administratorAlert": admin_alert,
+            "message": (
+                "IFSE responder assignment created. Responder acceptance "
+                "and arrival are not yet confirmed."
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("IFSE dispatch failed:", type(exc).__name__, str(exc))
+        try:
+            db.collection("ifseAuditLogs").add({
+                "module": "SOS",
+                "ifseGenerated": True,
+                "action": "DISPATCH_FAILED",
+                "emergencyId": emergency_id,
+                "actor": "IFSE System",
+                "description": str(exc)[:500],
+                "dispatchStatus": "Failed",
+                "createdAt": firestore.SERVER_TIMESTAMP,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            })
+        except Exception as audit_exc:
+            print("SOS failure audit failed:", type(audit_exc).__name__, str(audit_exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc) or "IFSE dispatch failed.",
+        ) from exc
