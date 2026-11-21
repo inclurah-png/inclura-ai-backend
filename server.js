@@ -75,9 +75,13 @@ app.use((req, res, next) => {
 
 app.get("/", (req, res) => {
   res.status(200).json({
-    success: true,
-    message: "Inclura Backend Running Successfully",
-    version: "1.0.0",
+    status: "Inclura AI Backend Running",
+    version: "1.2.1",
+    creatorScoring: "available",
+    postReactions: "available",
+    ifseDispatch: "available",
+    sosAdministratorAlerts: "available",
+    sosAuditLogging: "available"
   });
 });
 
