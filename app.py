@@ -111,9 +111,23 @@ def activate_sos_notification_only_access(
         account = auth.get_user(uid, app=firebase_app)
         account_email = (account.email or "").strip().lower()
         if not account_email or account_email not in configured_emails:
+            print(
+                "SOS notification access mismatch:",
+                "project_id=", firebase_app.project_id,
+                "account_email=", repr(account_email),
+                "configured_email_count=", len(configured_emails),
+            )
             raise HTTPException(
                 status_code=403,
-                detail="This signed-in account is not approved for SOS notification-only access.",
+                detail=(
+                    "SOS access check: backend project="
+                    + str(firebase_app.project_id)
+                    + "; Firebase account email="
+                    + (account_email or "(missing)")
+                    + "; configured allowlist entries="
+                    + str(len(configured_emails))
+                    + ". The backend account email did not match the allowlist."
+                ),
             )
 
         claims = dict(account.custom_claims or {})
