@@ -1,7 +1,7 @@
 /*
  * INCLURA ENTERPRISE SERVER
  * Existing API routes, database connections, Socket.IO,
- * security middleware, and creator-score integration.
+ * security middleware, creator scoring, and Firestore reactions.
  */
 
 require("dotenv").config();
@@ -16,12 +16,10 @@ const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 const { Server } = require("socket.io");
 
-// Database connections
 const connectMongoDB = require("./database/mongodb");
 const connectPostgreSQL = require("./postgresql");
 const connectRedis = require("./database/redis");
 
-// Existing API routes
 const authRoutes = require("./routes/auth.routes");
 const userRoutes = require("./routes/user.routes");
 const postRoutes = require("./routes/post.routes");
@@ -38,74 +36,40 @@ const analyticsRoutes = require("./routes/analytics.routes");
 const adminRoutes = require("./routes/admin.routes");
 const notificationRoutes = require("./routes/notification.routes");
 
-// Creator-score route
 const creatorScoreRoutes = require("./creatorScore.routes");
+const postReactionRoutes = require("./postReactions.routes");
 
-// Existing root-level middleware files
 const authMiddleware = require("./auth.middleware");
 const errorMiddleware = require("./error.middleware");
 
-// Express application
 const app = express();
 const server = http.createServer(app);
 
-// Socket.IO
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
+  cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-// --------------------------------------------------
-// SECURITY AND REQUEST MIDDLEWARE
-// --------------------------------------------------
-
 app.use(helmet());
-
-app.use(
-  cors({
-    origin: "*",
-    credentials: true,
-  })
-);
-
+app.use(cors({ origin: "*", credentials: true }));
 app.use(compression());
 app.use(cookieParser());
-
-app.use(
-  express.json({
-    limit: "100mb",
-  })
-);
-
-app.use(
-  express.urlencoded({
-    extended: true,
-    limit: "100mb",
-  })
-);
-
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ extended: true, limit: "100mb" }));
 app.use(morgan("dev"));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 1000,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: "Too many requests. Please try again later.",
 });
-
 app.use(limiter);
-
 app.use("/uploads", express.static("uploads"));
-
 app.use((req, res, next) => {
   res.setHeader("X-Inclura-Accessibility", "enabled");
   next();
 });
-
-// --------------------------------------------------
-// HEALTH CHECK
-// --------------------------------------------------
 
 app.get("/", (req, res) => {
   res.status(200).json({
@@ -115,18 +79,13 @@ app.get("/", (req, res) => {
   });
 });
 
-// --------------------------------------------------
-// API ROUTES
-// --------------------------------------------------
-
 // Authentication
 app.use("/api/auth", authRoutes);
 
-// Creator-score endpoint.
-// Firebase ID-token verification is handled inside
-// creatorScore.routes.js by firebaseAuth.middleware.js.
-// Do not put the existing JWT authMiddleware in front
-// of this route.
+// These endpoints verify Firebase ID tokens themselves.
+// Register the Firestore reaction endpoint BEFORE the legacy
+// JWT-protected MongoDB post router.
+app.use("/api/posts", postReactionRoutes);
 app.use("/api/creator-score", creatorScoreRoutes);
 
 // Existing protected routes
@@ -145,55 +104,22 @@ app.use("/api/analytics", authMiddleware, analyticsRoutes);
 app.use("/api/admin", authMiddleware, adminRoutes);
 app.use("/api/notifications", authMiddleware, notificationRoutes);
 
-// --------------------------------------------------
-// SOCKET.IO EVENTS
-// --------------------------------------------------
-
 io.on("connection", (socket) => {
   console.log("Socket connected:", socket.id);
-
-  socket.on("send_message", (data) => {
-    socket.broadcast.emit("receive_message", data);
-  });
-
-  socket.on("livestream_chat", (data) => {
-    io.emit("livestream_chat", data);
-  });
-
-  socket.on("typing", (data) => {
-    socket.broadcast.emit("typing", data);
-  });
-
-  socket.on("send_notification", (data) => {
-    socket.broadcast.emit("receive_notification", data);
-  });
-
-  socket.on("emergency_alert", (data) => {
-    io.emit("emergency_alert", data);
-  });
-
-  socket.on("voice_navigation", (data) => {
-    socket.emit("voice_navigation_response", {
-      success: true,
-      data,
-    });
-  });
-
-  socket.on("disconnect", () => {
-    console.log("Socket disconnected:", socket.id);
-  });
+  socket.on("send_message", (data) => socket.broadcast.emit("receive_message", data));
+  socket.on("livestream_chat", (data) => io.emit("livestream_chat", data));
+  socket.on("typing", (data) => socket.broadcast.emit("typing", data));
+  socket.on("send_notification", (data) => socket.broadcast.emit("receive_notification", data));
+  socket.on("emergency_alert", (data) => io.emit("emergency_alert", data));
+  socket.on("voice_navigation", (data) => socket.emit("voice_navigation_response", { success: true, data }));
+  socket.on("disconnect", () => console.log("Socket disconnected:", socket.id));
 });
-
-// --------------------------------------------------
-// DATABASE INITIALIZATION
-// --------------------------------------------------
 
 const initializeDatabases = async () => {
   try {
     await connectMongoDB();
     await connectPostgreSQL();
     await connectRedis();
-
     console.log("All databases connected successfully");
   } catch (error) {
     console.error("Database initialization failed:", error);
@@ -201,51 +127,21 @@ const initializeDatabases = async () => {
   }
 };
 
-// --------------------------------------------------
-// ERROR HANDLING AND NOT FOUND
-// Keep these after all API routes.
-// --------------------------------------------------
-
 app.use(errorMiddleware);
-
 app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: "Route not found",
-  });
+  res.status(404).json({ success: false, message: "Route not found" });
 });
-
-// --------------------------------------------------
-// SERVER STARTUP
-// --------------------------------------------------
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   await initializeDatabases();
-
-  server.listen(PORT, () => {
-    console.log(`Inclura backend listening on port ${PORT}`);
-  });
+  server.listen(PORT, () => console.log(`Inclura backend listening on port ${PORT}`));
 };
 
 startServer();
 
-// --------------------------------------------------
-// PROCESS-LEVEL ERROR HANDLING
-// --------------------------------------------------
+process.on("uncaughtException", (error) => console.error("Uncaught exception:", error));
+process.on("unhandledRejection", (reason) => console.error("Unhandled promise rejection:", reason));
 
-process.on("uncaughtException", (error) => {
-  console.error("Uncaught exception:", error);
-});
-
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled promise rejection:", reason);
-});
-
-// Exports
-module.exports = {
-  app,
-  server,
-  io,
-};
+module.exports = { app, server, io };
