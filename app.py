@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="Inclura AI Backend",
-    version="1.2.0",
+    version="1.3.0",
 )
 
 app.add_middleware(
@@ -149,9 +149,12 @@ def verify_bearer_token(authorization):
 def home():
     return {
         "status": "Inclura AI Backend Running",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "creatorScoring": "available",
         "postReactions": "available",
+        "ifseDispatch": "available",
+        "sosAdministratorAlerts": "available",
+        "sosAuditLogging": "available",
     }
 
 
