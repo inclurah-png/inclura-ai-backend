@@ -19,7 +19,7 @@ function resolveRuleId(emergencyData) {
 
 async function alertAdministrators(db, emergencyId, emergency, ruleId) {
   const now = new Date();
-  const auditRef = db.collection("ifseAuditLogs").doc();
+  const auditRef = db.collection("ifseAuditLogs").doc("sos_received_" + emergencyId);
   await auditRef.set({
     module: "SOS",
     ifseGenerated: true,
@@ -50,7 +50,7 @@ async function alertAdministrators(db, emergencyId, emergency, ruleId) {
 
   const batch = db.batch();
   for (const adminUid of admins) {
-    const notificationRef = db.collection("notifications").doc();
+    const notificationRef = db.collection("notifications").doc(emergencyId + "_admin_" + adminUid);
     batch.set(notificationRef, {
       receiverId: adminUid,
       senderId: "system",
@@ -174,7 +174,7 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
       responderData.username ||
       "Emergency Response Team";
 
-    const assignmentRef = db.collection("emergencyAssignments").doc();
+    const assignmentRef = db.collection("emergencyAssignments").doc(`${emergencyId}_${responder.id}`);\n    const existingAssignment = await assignmentRef.get();\n    if (existingAssignment.exists) {\n      return res.status(200).json({\n        success: true,\n        emergencyId,\n        escalationId: "",\n        agency: existingAssignment.data().responderAgency || primaryAgency.agencyName,\n        responderName: existingAssignment.data().responderName || "Assigned responder",\n        responderId: responder.id,\n        assignmentStatus: existingAssignment.data().assignmentStatus || "Pending",\n        administratorAlert: adminAlert,\n        message: "An IFSE responder assignment already exists. No duplicate assignment was created."\n      });\n    }
     const now = new Date();
 
     const assignment = {
@@ -290,6 +290,22 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
     });
 
     await batch.commit();
+    await db.collection("ifseAuditLogs").add({
+      module: "SOS",
+      ifseGenerated: true,
+      action: "RESPONDER_ASSIGNED",
+      emergencyId,
+      actor: "IFSE System",
+      description: "An eligible responder was assigned automatically. Acceptance and arrival remain unconfirmed.",
+      assignedAgency: primaryAgency.agencyName,
+      responderName,
+      escalationLevel: 0,
+      escalationStatus: "Waiting for responder acceptance",
+      gpsLatitude: Number(emergency.gpsLatitude) || 0,
+      gpsLongitude: Number(emergency.gpsLongitude) || 0,
+      createdAt: now,
+      updatedAt: now
+    });
 
     return res.status(200).json({
       success: true,
@@ -306,6 +322,22 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
     });
   } catch (error) {
     console.error("IFSE server dispatch failed:", error);
+    try {
+      const db = getFirestore();
+      await db.collection("ifseAuditLogs").add({
+        module: "SOS",
+        ifseGenerated: true,
+        action: "DISPATCH_FAILED",
+        emergencyId,
+        actor: "IFSE System",
+        description: String(error?.message || "Automatic dispatch failed.").slice(0, 500),
+        dispatchStatus: "Failed",
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+    } catch (auditError) {
+      console.error("IFSE dispatch failure audit could not be saved:", auditError.message);
+    }
     return res.status(500).json({
       success: false,
       emergencyRecorded: true,
