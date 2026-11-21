@@ -241,26 +241,51 @@ def sos_responder_readiness(
         raise HTTPException(status_code=403, detail="Read-only SOS monitoring access is required.")
 
     db = get_firestore()
+    # Dispatch classifies every SOS into one of these exact rule document IDs.
+    # Inspect all of them, including missing/inactive/unpublished documents;
+    # filtering to active rules alone hides the actual reason dispatch fails.
+    required_rule_ids = ("MEDICAL", "FIRE", "FLOOD", "POLICE", "ARMED_ATTACK")
     results = []
-    rules = db.collection("emergencyResponseRules").get()
-    for rule_doc in rules:
-        rule = rule_doc.to_dict() or {}
-        if rule.get("active") is not True:
-            continue
-        primary = str(rule.get("primaryAgency") or "").strip()
+    for rule_id in required_rule_ids:
+        rule_snapshot = (
+            db.collection("emergencyResponseRules").document(rule_id).get()
+        )
         item = {
-            "ruleId": rule_doc.id,
-            "primaryAgency": primary,
-            "active": True,
+            "ruleId": rule_id,
+            "exists": rule_snapshot.exists,
+            "active": False,
+            "published": None,
+            "primaryAgency": "",
             "responderCollection": "",
             "responderRecords": 0,
             "eligibleResponders": 0,
             "status": "Unavailable",
             "reason": "",
         }
+        if not rule_snapshot.exists:
+            item["status"] = "Missing response rule"
+            item["reason"] = (
+                f'The exact "{rule_id}" rule document required by automatic SOS dispatch does not exist.'
+            )
+            results.append(item)
+            continue
+
+        rule = rule_snapshot.to_dict() or {}
+        item["active"] = rule.get("active") is True
+        if "published" in rule:
+            item["published"] = rule.get("published") is True
+        primary = str(rule.get("primaryAgency") or "").strip()
+        item["primaryAgency"] = primary
+
+        if rule.get("active") is not True:
+            item["status"] = "Rule inactive"
+            item["reason"] = "The exact response rule exists but active is not true."
+            results.append(item)
+            continue
+
         try:
             if not primary:
-                raise RuntimeError("Active rule has no primary agency.")
+                raise RuntimeError("Active response rule has no primaryAgency value.")
             agency = resolve_ifse_agency(db, primary)
             item["primaryAgency"] = agency["agencyName"]
             item["responderCollection"] = agency["responderCollection"]
@@ -284,7 +309,11 @@ def sos_responder_readiness(
             item["eligibleResponders"] = eligible
             item["status"] = "Ready" if eligible else "No eligible responders"
             if not eligible:
-                item["reason"] = "No responder in this agency collection currently meets all dispatch eligibility checks."
+                item["reason"] = (
+                    "The agency collection exists, but no record currently meets "
+                    "available=true, onDuty=true, verified=true, not suspended, "
+                    "and any required IFSE verification."
+                )
         except Exception as exc:
             item["reason"] = str(exc)[:300]
         results.append(item)
@@ -293,7 +322,8 @@ def sos_responder_readiness(
         "success": True,
         "readOnly": True,
         "dispatchControl": False,
-        "activeRulesChecked": len(results),
+        "requiredRulesChecked": len(results),
+        "readyRules": sum(1 for item in results if item["status"] == "Ready"),
         "agencies": results,
     }
 
