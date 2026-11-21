@@ -1084,3 +1084,229 @@ def dispatch_ifse_emergency(
             status_code=500,
             detail=str(exc) or "IFSE dispatch failed.",
         ) from exc
+
+
+# --------------------------------------------------
+# TRUSTED-CONTACT SMS VIA TERMII
+# --------------------------------------------------
+
+import urllib.error
+import urllib.request
+
+
+def normalize_nigeria_phone(value):
+    raw = str(value or "").strip()
+    digits = re.sub(r"[^0-9]", "", raw)
+    if not digits:
+        return ""
+    if raw.startswith("+") or digits.startswith("234"):
+        return digits
+    if digits.startswith("0") and len(digits) == 11:
+        return "234" + digits[1:]
+    return ""
+
+
+def submit_termii_sms(recipient, message):
+    api_key = os.getenv("TERMII_API_KEY")
+    if not api_key:
+        raise RuntimeError("SMS provider is not configured.")
+
+    payload = {
+        "to": recipient,
+        "from": os.getenv("TERMII_SENDER_ID") or "INCLURA",
+        "sms": message,
+        "type": "plain",
+        "channel": "generic",
+        "api_key": api_key,
+    }
+    request = urllib.request.Request(
+        "https://api.ng.termii.com/api/sms/send",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.loads(response.read().decode("utf-8") or "{}")
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError("The SMS provider did not accept this message.")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("The SMS provider did not accept this message.") from exc
+
+    if str(result.get("code", "")).lower() in ("2", "error"):
+        raise RuntimeError("The SMS provider did not accept this message.")
+    return result
+
+
+@app.post("/api/sos-notifications/{emergency_id}/send")
+def send_sos_trusted_contact_sms(
+    emergency_id: str,
+    authorization: str | None = Header(default=None),
+):
+    uid = verify_bearer_token(authorization)
+    emergency_id = emergency_id.strip()
+    if (
+        not emergency_id
+        or "/" in emergency_id
+        or len(emergency_id) > 150
+    ):
+        raise HTTPException(status_code=400, detail="Invalid emergency reference.")
+
+    if not os.getenv("TERMII_API_KEY"):
+        raise HTTPException(
+            status_code=503,
+            detail="SMS delivery is not configured yet.",
+        )
+
+    try:
+        db = get_firestore()
+        emergency_ref = db.collection("emergencySOS").document(emergency_id)
+        emergency_snapshot = emergency_ref.get()
+        if (
+            not emergency_snapshot.exists
+            or (emergency_snapshot.to_dict() or {}).get("userId") != uid
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail="Emergency record not found.",
+            )
+
+        emergency = emergency_snapshot.to_dict() or {}
+        contacts_snapshot = (
+            db.collection("trustedContacts")
+            .where("ownerId", "==", uid)
+            .get()
+        )
+        contacts = [
+            (doc.id, doc.to_dict() or {})
+            for doc in contacts_snapshot
+            if (doc.to_dict() or {}).get("status") == "Active"
+            and (doc.to_dict() or {}).get("phoneNumber")
+        ]
+
+        if not contacts:
+            return {
+                "success": True,
+                "sent": 0,
+                "failed": 0,
+                "message": "No active trusted contacts have a phone number.",
+            }
+
+        location_text = str(emergency.get("location") or "").strip()
+        try:
+            latitude = float(emergency.get("latitude"))
+            longitude = float(emergency.get("longitude"))
+        except (TypeError, ValueError):
+            latitude = longitude = 0.0
+
+        maps_link = (
+            f" https://maps.google.com/?q={latitude},{longitude}"
+            if latitude or longitude
+            else ""
+        )
+        message = "\n".join([
+            "INCLURA SOS ALERT",
+            "Member: " + str(emergency.get("userName") or "Inclura member")[:80],
+            "Emergency: " + str(emergency.get("emergencyType") or "Emergency")[:50],
+            "Priority: " + str(emergency.get("priority") or "Unspecified")[:20],
+            "Location: " + (location_text[:180] if location_text else "Not provided"),
+            maps_link,
+            "Please contact the member immediately. Ref: " + emergency_id,
+        ])[:900]
+
+        sent = 0
+        failed = 0
+        outcomes = []
+
+        for contact_id, contact in contacts:
+            notification_ref = (
+                db.collection("emergencyNotifications")
+                .document(f"{emergency_id}_{contact_id}_sms")
+            )
+            previous_snapshot = notification_ref.get()
+            previous = previous_snapshot.to_dict() or {}
+            if previous_snapshot.exists and previous.get("smsStatus") in (
+                "accepted", "delivered"
+            ):
+                outcomes.append({
+                    "contactId": contact_id,
+                    "status": previous.get("smsStatus"),
+                })
+                continue
+
+            recipient = normalize_nigeria_phone(contact.get("phoneNumber"))
+            base_record = {
+                "emergencyId": emergency_id,
+                "recipientType": "Trusted Contact",
+                "recipientId": contact_id,
+                "recipientName": contact.get("fullName") or "",
+                "recipientPhone": contact.get("phoneNumber") or "",
+                "deliveryMethod": "SMS",
+            }
+
+            if not recipient:
+                failed += 1
+                notification_ref.set({
+                    **base_record,
+                    "smsStatus": "failed",
+                    "smsError": (
+                        "Phone number must include a valid Nigerian "
+                        "or international country code."
+                    ),
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+                outcomes.append({"contactId": contact_id, "status": "failed"})
+                continue
+
+            notification_ref.set({
+                **base_record,
+                "smsStatus": "sending",
+                "smsError": "",
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+
+            try:
+                provider = submit_termii_sms(recipient, message)
+                notification_ref.set({
+                    "smsStatus": "accepted",
+                    "smsProvider": "Termii",
+                    "smsMessageId": (
+                        provider.get("message_id")
+                        or provider.get("messageId")
+                        or ""
+                    ),
+                    "smsProviderResponseCode": provider.get("code") or "",
+                    "smsAcceptedAt": firestore.SERVER_TIMESTAMP,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+                sent += 1
+                outcomes.append({"contactId": contact_id, "status": "accepted"})
+            except Exception as exc:
+                print("Termii SOS SMS failed:", type(exc).__name__, str(exc))
+                notification_ref.set({
+                    "smsStatus": "failed",
+                    "smsError": "Provider did not accept the SMS.",
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+                failed += 1
+                outcomes.append({"contactId": contact_id, "status": "failed"})
+
+        return {
+            "success": True,
+            "sent": sent,
+            "failed": failed,
+            "outcomes": outcomes,
+            "message": (
+                "SMS submission results recorded. "
+                "Provider acceptance does not confirm delivery."
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("SOS trusted-contact SMS failed:", type(exc).__name__, str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="SOS SMS notifications could not be processed.",
+        ) from exc
