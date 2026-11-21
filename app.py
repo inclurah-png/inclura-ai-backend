@@ -225,6 +225,80 @@ def home():
 
 
 # --------------------------------------------------
+# READ-ONLY SOS RESPONDER READINESS
+# --------------------------------------------------
+
+@app.get("/api/sos-responder-readiness")
+def sos_responder_readiness(
+    authorization: str | None = Header(default=None),
+):
+    """Return responder counts only; this endpoint cannot create or control dispatch."""
+    uid = verify_bearer_token(authorization)
+    firebase_app = get_firebase_admin()
+    account = auth.get_user(uid, app=firebase_app)
+    claims = account.custom_claims or {}
+    if claims.get("admin") is not True and claims.get("sosNotificationOnly") is not True:
+        raise HTTPException(status_code=403, detail="Read-only SOS monitoring access is required.")
+
+    db = get_firestore()
+    results = []
+    rules = db.collection("emergencyResponseRules").get()
+    for rule_doc in rules:
+        rule = rule_doc.to_dict() or {}
+        if rule.get("active") is not True:
+            continue
+        primary = str(rule.get("primaryAgency") or "").strip()
+        item = {
+            "ruleId": rule_doc.id,
+            "primaryAgency": primary,
+            "active": True,
+            "responderCollection": "",
+            "responderRecords": 0,
+            "eligibleResponders": 0,
+            "status": "Unavailable",
+            "reason": "",
+        }
+        try:
+            if not primary:
+                raise RuntimeError("Active rule has no primary agency.")
+            agency = resolve_ifse_agency(db, primary)
+            item["primaryAgency"] = agency["agencyName"]
+            item["responderCollection"] = agency["responderCollection"]
+            responders = db.collection(agency["responderCollection"]).get()
+            item["responderRecords"] = len(responders)
+            eligible = 0
+            for responder_doc in responders:
+                data = responder_doc.to_dict() or {}
+                verification_ok = (
+                    data.get("ifseVerified") is True
+                    if agency["ifseVerifiedRequired"] else True
+                )
+                if (
+                    data.get("available") is True
+                    and data.get("onDuty") is True
+                    and data.get("verified") is True
+                    and verification_ok
+                    and data.get("suspended") is not True
+                ):
+                    eligible += 1
+            item["eligibleResponders"] = eligible
+            item["status"] = "Ready" if eligible else "No eligible responders"
+            if not eligible:
+                item["reason"] = "No responder in this agency collection currently meets all dispatch eligibility checks."
+        except Exception as exc:
+            item["reason"] = str(exc)[:300]
+        results.append(item)
+
+    return {
+        "success": True,
+        "readOnly": True,
+        "dispatchControl": False,
+        "activeRulesChecked": len(results),
+        "agencies": results,
+    }
+
+
+# --------------------------------------------------
 # CREATOR ACTIVITY SCORING
 # --------------------------------------------------
 
