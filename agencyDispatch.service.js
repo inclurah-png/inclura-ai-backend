@@ -1,7 +1,5 @@
-const express = require("express");
 const crypto = require("crypto");
 
-const { getFirestore } = require("./firebaseAdmin");
 
 function envKeyPart(value) {
   return String(value || "")
@@ -17,7 +15,13 @@ function getAgencyChannelConfig(agencyCode) {
   const prefix = "IFSE_AGENCY_" + code;
   const url = String(process.env[prefix + "_DISPATCH_URL"] || "").trim();
   const secret = String(process.env[prefix + "_DISPATCH_SECRET"] || "").trim();
-  if (!url) return null;
+  if (!url || !secret) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
   return { url, secret };
 }
 
@@ -77,7 +81,7 @@ async function createAgencyDispatchRecord(db, emergency, assignment, agency) {
   if (!config) {
     await ref.set({
       status: "queued",
-      deliveryError: "No authorised agency dispatch channel is configured.",
+      deliveryError: "No authorised HTTPS agency endpoint and signing secret are configured.",
       updatedAt: new Date(),
     }, { merge: true });
     return { status: "queued", notificationId, message: "Agency dispatch queued; no authorised external channel is configured." };
