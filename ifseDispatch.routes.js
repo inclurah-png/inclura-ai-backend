@@ -130,6 +130,15 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
     return res.status(400).json({ success: false, message: "Authenticated user and emergency ID are required." });
   }
 
+  // Anonymous Firebase guests may subscribe to community alerts, but
+  // must never initiate responder dispatch or administrator SOS alerts.
+  if (req.firebaseUser?.signInProvider === "anonymous") {
+    return res.status(403).json({
+      success: false,
+      message: "A registered Inclura account is required to dispatch an SOS."
+    });
+  }
+
   try {
     const db = getFirestore();
     const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
