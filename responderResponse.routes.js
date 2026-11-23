@@ -100,54 +100,72 @@ router.post("/:emergencyId/accept", firebaseAuthMiddleware, async (req, res) => 
     const now = new Date();
     const escalationSnap = await db.collection("emergencyEscalationQueue")
       .where("emergencyId", "==", emergencyId).limit(1).get();
+    const escalationRef = escalationSnap.empty ? null : escalationSnap.docs[0].ref;
+    const timelineRef = db.collection("emergencyTimeline").doc();
 
-    const batch = db.batch();
+    const transactionResult = await db.runTransaction(async (tx) => {
+      const freshEmergencySnap = await tx.get(emergencyRef);
+      const freshAssignmentSnap = await tx.get(assignmentDoc.ref);
+      const freshEscalationSnap = escalationRef ? await tx.get(escalationRef) : null;
+      if (!freshEmergencySnap.exists || !freshAssignmentSnap.exists) return "missing";
+      const freshEmergency = freshEmergencySnap.data();
+      const freshAssignment = freshAssignmentSnap.data();
+      if (String(freshEmergency.assignedResponderId || "") !== responderId ||
+          String(freshAssignment.responderId || "") !== responderId) return "superseded";
+      if (freshAssignment.cancelled === true || freshAssignment.completed === true) return "inactive";
+      if (freshAssignment.accepted === true || freshAssignment.assignmentStatus === "Accepted") return "already-accepted";
+      if (freshAssignment.assignmentStatus !== "Pending") return "not-pending";
 
-    batch.update(assignmentDoc.ref, {
-      assignmentStatus: "Accepted",
-      accepted: true,
-      acceptedAt: now,
-      updatedAt: now
-    });
-
-    batch.update(emergencyRef, {
-      responseStatus: "Responder Accepted",
-      assignmentStatus: "Accepted",
-      incidentStatus: "Responder Accepted",
-      updatedAt: now
-    });
-
-    if (!escalationSnap.empty) {
-      batch.update(escalationSnap.docs[0].ref, {
+      tx.update(assignmentDoc.ref, {
+        assignmentStatus: "Accepted",
         accepted: true,
         acceptedAt: now,
-        waitingForAcceptance: false,
-        status: "Accepted",
         updatedAt: now
       });
-    }
-
-    const timelineRef = db.collection("emergencyTimeline").doc();
-    batch.set(timelineRef, {
-      timelineId: emergencyId + "_accept_" + now.getTime(),
-      emergencyId,
-      eventType: "Responder Accepted",
-      eventDescription: "Assigned responder accepted the SOS through the authenticated responder channel.",
-      performedBy: responderId,
-      performerType: "Responder",
-      responderId,
-      responderName: assignment.responderName || "",
-      responderAgency: assignment.responderAgency || "",
-      responderAgencyCode: assignment.responderAgencyCode || "",
-      eventStatus: "Completed",
-      visibleToFamily: true,
-      visibleToGovernment: true,
-      visibleToResponders: true,
-      createdAt: now,
-      updatedAt: now
+      tx.update(emergencyRef, {
+        responseStatus: "Responder Accepted",
+        assignmentStatus: "Accepted",
+        incidentStatus: "Responder Accepted",
+        updatedAt: now
+      });
+      if (freshEscalationSnap?.exists) {
+        tx.update(escalationRef, {
+          accepted: true,
+          acceptedAt: now,
+          waitingForAcceptance: false,
+          status: "Accepted",
+          escalationLeaseToken: "",
+          escalationLeaseUntil: new Date(0),
+          updatedAt: now
+        });
+      }
+      tx.set(timelineRef, {
+        timelineId: emergencyId + "_accept_" + now.getTime(),
+        emergencyId,
+        eventType: "Responder Accepted",
+        eventDescription: "Assigned responder accepted the SOS through the authenticated responder channel.",
+        performedBy: responderId,
+        performerType: "Responder",
+        responderId,
+        responderName: freshAssignment.responderName || "",
+        responderAgency: freshAssignment.responderAgency || "",
+        responderAgencyCode: freshAssignment.responderAgencyCode || "",
+        eventStatus: "Completed",
+        visibleToFamily: true,
+        visibleToGovernment: true,
+        visibleToResponders: true,
+        createdAt: now,
+        updatedAt: now
+      });
+      return "accepted";
     });
 
-    await batch.commit();
+    if (transactionResult === "already-accepted") {
+      return res.status(200).json({ success: true, emergencyId, assignmentId: assignment.assignmentId, assignmentStatus: "Accepted", responseStatus: "Responder Accepted", message: "This responder acceptance was already recorded." });
+    }
+    if (transactionResult !== "accepted") {
+      return res.status(409).json({ success: false, message: transactionResult === "superseded" ? "This assignment has been superseded by a newer dispatch." : "This assignment is no longer eligible for acceptance." });
+    }
 
     return res.status(200).json({
       success: true,
@@ -220,42 +238,57 @@ router.post("/:emergencyId/arrived", firebaseAuthMiddleware, async (req, res) =>
     }
 
     const now = new Date();
-    const batch = db.batch();
-
-    batch.update(assignmentDoc.ref, {
-      arrived: true,
-      arrivedAt: now,
-      assignmentStatus: "Responder On Scene",
-      updatedAt: now
-    });
-
-    batch.update(emergencyRef, {
-      responseStatus: "Responder On Scene",
-      incidentStatus: "Responder On Scene",
-      updatedAt: now
-    });
-
     const timelineRef = db.collection("emergencyTimeline").doc();
-    batch.set(timelineRef, {
-      timelineId: emergencyId + "_arrival_" + now.getTime(),
-      emergencyId,
-      eventType: "Responder Arrived",
-      eventDescription: "Assigned responder reported arrival through the authenticated responder channel.",
-      performedBy: responderId,
-      performerType: "Responder",
-      responderId,
-      responderName: assignment.responderName || "",
-      responderAgency: assignment.responderAgency || "",
-      responderAgencyCode: assignment.responderAgencyCode || "",
-      eventStatus: "Completed",
-      visibleToFamily: true,
-      visibleToGovernment: true,
-      visibleToResponders: true,
-      createdAt: now,
-      updatedAt: now
+    const transactionResult = await db.runTransaction(async (tx) => {
+      const freshEmergencySnap = await tx.get(emergencyRef);
+      const freshAssignmentSnap = await tx.get(assignmentDoc.ref);
+      if (!freshEmergencySnap.exists || !freshAssignmentSnap.exists) return "missing";
+      const freshEmergency = freshEmergencySnap.data();
+      const freshAssignment = freshAssignmentSnap.data();
+      if (String(freshEmergency.assignedResponderId || "") !== responderId ||
+          String(freshAssignment.responderId || "") !== responderId) return "superseded";
+      if (freshAssignment.cancelled === true || freshAssignment.completed === true) return "inactive";
+      if (freshAssignment.accepted !== true && freshAssignment.assignmentStatus !== "Accepted") return "not-accepted";
+      if (freshAssignment.arrived === true) return "already-arrived";
+
+      tx.update(assignmentDoc.ref, {
+        arrived: true,
+        arrivedAt: now,
+        assignmentStatus: "Responder On Scene",
+        updatedAt: now
+      });
+      tx.update(emergencyRef, {
+        responseStatus: "Responder On Scene",
+        incidentStatus: "Responder On Scene",
+        updatedAt: now
+      });
+      tx.set(timelineRef, {
+        timelineId: emergencyId + "_arrival_" + now.getTime(),
+        emergencyId,
+        eventType: "Responder Arrived",
+        eventDescription: "Assigned responder reported arrival through the authenticated responder channel.",
+        performedBy: responderId,
+        performerType: "Responder",
+        responderId,
+        responderName: freshAssignment.responderName || "",
+        responderAgency: freshAssignment.responderAgency || "",
+        responderAgencyCode: freshAssignment.responderAgencyCode || "",
+        eventStatus: "Completed",
+        visibleToFamily: true,
+        visibleToGovernment: true,
+        visibleToResponders: true,
+        createdAt: now,
+        updatedAt: now
+      });
+      return "arrived";
     });
 
-    await batch.commit();
+    if (transactionResult === "already-arrived") {
+      return res.status(200).json({ success: true, emergencyId, assignmentStatus: "Responder On Scene", responseStatus: "Responder On Scene", message: "Responder arrival was already recorded." });
+    }
+    if (transactionResult !== "arrived") {
+      return res.status(409).json({ success: false, message: transactionResult === "superseded" ? "This assignment has been superseded by a newer dispatch." : "Arrival requires the current accepted assignment." });
+    }
     return res.status(200).json({
       success: true,
       emergencyId,
