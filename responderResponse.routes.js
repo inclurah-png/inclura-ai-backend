@@ -83,6 +83,19 @@ router.post("/:emergencyId/accept", firebaseAuthMiddleware, async (req, res) => 
     if (assignment.cancelled === true || assignment.completed === true) {
       return res.status(409).json({ success: false, message: "This assignment is no longer accepting responses." });
     }
+    if (assignment.accepted === true || assignment.assignmentStatus === "Accepted") {
+      return res.status(200).json({
+        success: true,
+        emergencyId,
+        assignmentId: assignment.assignmentId,
+        assignmentStatus: "Accepted",
+        responseStatus: "Responder Accepted",
+        message: "This responder acceptance was already recorded."
+      });
+    }
+    if (assignment.assignmentStatus !== "Pending") {
+      return res.status(409).json({ success: false, message: "Only a pending assignment can be accepted." });
+    }
 
     const now = new Date();
     const escalationSnap = await db.collection("emergencyEscalationQueue")
@@ -189,6 +202,21 @@ router.post("/:emergencyId/arrived", firebaseAuthMiddleware, async (req, res) =>
 
     if (!linkedUid || linkedUid !== req.firebaseUser.uid) {
       return res.status(403).json({ success: false, message: "This responder is not authorised for the assignment." });
+    }
+    if (assignment.cancelled === true || assignment.completed === true) {
+      return res.status(409).json({ success: false, message: "This assignment is no longer active." });
+    }
+    if (assignment.accepted !== true && assignment.assignmentStatus !== "Accepted") {
+      return res.status(409).json({ success: false, message: "The responder must accept the assignment before reporting arrival." });
+    }
+    if (assignment.arrived === true) {
+      return res.status(200).json({
+        success: true,
+        emergencyId,
+        assignmentStatus: "Responder On Scene",
+        responseStatus: "Responder On Scene",
+        message: "Responder arrival was already recorded."
+      });
     }
 
     const now = new Date();
