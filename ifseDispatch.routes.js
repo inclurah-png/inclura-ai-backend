@@ -506,7 +506,7 @@ router.post("/escalate-due", async (req, res) => {
 
         tx.update(queueDoc.ref, {
           escalationLeaseToken: leaseToken,
-          escalationLeaseUntil: new Date(now.getTime() + 4 * 60 * 1000),
+          escalationLeaseUntil: new Date(now.getTime() + 10 * 60 * 1000),
           updatedAt: now
         });
         return { acquired: true, queue: fresh };
@@ -515,11 +515,15 @@ router.post("/escalate-due", async (req, res) => {
       if (!claim.acquired) continue;
       const queue = claim.queue;
       const releaseLease = async () => {
-        await queueDoc.ref.set({
-          escalationLeaseToken: "",
-          escalationLeaseUntil: new Date(0),
-          updatedAt: new Date()
-        }, { merge: true });
+        await db.runTransaction(async (tx) => {
+          const latest = await tx.get(queueDoc.ref);
+          if (!latest.exists || latest.data().escalationLeaseToken !== leaseToken) return;
+          tx.update(queueDoc.ref, {
+            escalationLeaseToken: "",
+            escalationLeaseUntil: new Date(0),
+            updatedAt: new Date()
+          });
+        });
       };
 
       const waitingStartedAt = queue.waitingStartedAt || queue.updatedAt || queue.createdAt;
@@ -685,8 +689,6 @@ router.post("/escalate-due", async (req, res) => {
           acceptedAt: null,
           status: "Waiting",
           waitingStartedAt: now,
-          escalationLeaseToken: "",
-          escalationLeaseUntil: new Date(0),
           currentAgency: agency.agencyName,
           currentAgencyCode: agency.agencyCode,
           ...escalationFlags,
