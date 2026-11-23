@@ -790,14 +790,22 @@ router.post("/escalate-due", async (req, res) => {
 
       if (!escalated) {
         const exhausted = Number(queue.escalationLevel || 0) >= 2 || !queue.secondaryAgency && !queue.tertiaryAgency;
-        await queueDoc.ref.set({
-          status: exhausted ? "Escalation Exhausted" : "Waiting",
-          waitingForAcceptance: exhausted ? false : true,
-          escalationError: lastFailure,
-          updatedAt: now
-        }, { merge: true });
+        const queueStillOwned = await db.runTransaction(async (tx) => {
+          const latest = await tx.get(queueDoc.ref);
+          if (!latest.exists || latest.data().escalationLeaseToken !== leaseToken ||
+              latest.data().accepted === true || latest.data().status !== "Waiting") return false;
+          tx.update(queueDoc.ref, {
+            status: exhausted ? "Escalation Exhausted" : "Waiting",
+            waitingForAcceptance: exhausted ? false : true,
+            escalationError: lastFailure,
+            escalationLeaseToken: "",
+            escalationLeaseUntil: new Date(0),
+            updatedAt: now
+          });
+          return true;
+        });
 
-        await db.collection("ifseAuditLogs").add({
+        if (queueStillOwned) await db.collection("ifseAuditLogs").add({
           module: "SOS",
           ifseGenerated: true,
           action: exhausted ? "ESCALATION_EXHAUSTED" : "ESCALATION_PENDING_RETRY",
@@ -811,11 +819,15 @@ router.post("/escalate-due", async (req, res) => {
           updatedAt: now
         });
 
-        results.push({
-          emergencyId,
-          status: exhausted ? "exhausted" : "retry-pending",
-          reason: lastFailure
-        });
+        if (queueStillOwned) {
+          results.push({
+            emergencyId,
+            status: exhausted ? "exhausted" : "retry-pending",
+            reason: lastFailure
+          });
+        } else {
+          results.push({ emergencyId, status: "claim-lost-or-case-updated" });
+        }
         await releaseLease();
       } else {
         // If a next-level assignment was committed, its batch already released
