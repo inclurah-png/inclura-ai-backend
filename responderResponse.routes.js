@@ -10,12 +10,16 @@ function isRegisteredUser(req) {
     req.firebaseUser.signInProvider !== "anonymous";
 }
 
-async function findAssignment(db, emergencyId) {
+async function findAssignment(db, emergencyId, currentResponderId) {
+  if (!currentResponderId) return null;
   const snap = await db.collection("emergencyAssignments")
     .where("emergencyId", "==", emergencyId)
-    .limit(1)
     .get();
-  return snap.empty ? null : snap.docs[0];
+  return snap.docs.find((doc) =>
+    String(doc.data().responderId || "") === String(currentResponderId) &&
+    doc.data().cancelled !== true &&
+    doc.data().completed !== true
+  ) || null;
 }
 
 router.post("/:emergencyId/accept", firebaseAuthMiddleware, async (req, res) => {
@@ -30,9 +34,18 @@ router.post("/:emergencyId/accept", firebaseAuthMiddleware, async (req, res) => 
 
   try {
     const db = getFirestore();
-    const assignmentDoc = await findAssignment(db, emergencyId);
+    const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
+    const emergencySnap = await emergencyRef.get();
+    if (!emergencySnap.exists) {
+      return res.status(404).json({ success: false, message: "Emergency record was not found." });
+    }
+    const assignmentDoc = await findAssignment(
+      db,
+      emergencyId,
+      emergencySnap.data().assignedResponderId
+    );
     if (!assignmentDoc) {
-      return res.status(404).json({ success: false, message: "Responder assignment was not found." });
+      return res.status(404).json({ success: false, message: "Current responder assignment was not found." });
     }
 
     const assignment = assignmentDoc.data();
@@ -72,7 +85,6 @@ router.post("/:emergencyId/accept", firebaseAuthMiddleware, async (req, res) => 
     }
 
     const now = new Date();
-    const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
     const escalationSnap = await db.collection("emergencyEscalationQueue")
       .where("emergencyId", "==", emergencyId).limit(1).get();
 
@@ -150,8 +162,19 @@ router.post("/:emergencyId/arrived", firebaseAuthMiddleware, async (req, res) =>
 
   try {
     const db = getFirestore();
-    const assignmentDoc = await findAssignment(db, emergencyId);
-    if (!assignmentDoc) return res.status(404).json({ success: false, message: "Responder assignment was not found." });
+    const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
+    const emergencySnap = await emergencyRef.get();
+    if (!emergencySnap.exists) {
+      return res.status(404).json({ success: false, message: "Emergency record was not found." });
+    }
+    const assignmentDoc = await findAssignment(
+      db,
+      emergencyId,
+      emergencySnap.data().assignedResponderId
+    );
+    if (!assignmentDoc) {
+      return res.status(404).json({ success: false, message: "Current responder assignment was not found." });
+    }
 
     const assignment = assignmentDoc.data();
     const responderId = String(assignment.responderId || "");
@@ -169,7 +192,6 @@ router.post("/:emergencyId/arrived", firebaseAuthMiddleware, async (req, res) =>
     }
 
     const now = new Date();
-    const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
     const batch = db.batch();
 
     batch.update(assignmentDoc.ref, {
