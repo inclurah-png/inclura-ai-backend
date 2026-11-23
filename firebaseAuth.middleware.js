@@ -47,7 +47,8 @@ const firebaseAuthMiddleware = async (req, res, next) => {
         req.firebaseUser = {
             uid: decodedToken.uid,
             email: decodedToken.email || null,
-            emailVerified: decodedToken.email_verified === true
+            emailVerified: decodedToken.email_verified === true,
+            signInProvider: decodedToken.firebase?.sign_in_provider || ""
         };
 
         return next();

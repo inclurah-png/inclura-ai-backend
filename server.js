@@ -40,6 +40,7 @@ const creatorScoreRoutes = require("./creatorScore.routes");
 const postReactionRoutes = require("./postReactions.routes");
 const sosNotificationsRoutes = require("./sosNotifications.routes");
 const ifseDispatchRoutes = require("./ifseDispatch.routes");
+const responderResponseRoutes = require("./responderResponse.routes");
 
 const authMiddleware = require("./auth.middleware");
 const errorMiddleware = require("./error.middleware");
@@ -95,6 +96,7 @@ app.use("/api/posts", postReactionRoutes);
 app.use("/api/creator-score", creatorScoreRoutes);
 app.use("/api/sos-notifications", sosNotificationsRoutes);
 app.use("/api/ifse-dispatch", ifseDispatchRoutes);
+app.use("/api/responder-response", responderResponseRoutes);
 
 // Existing protected routes
 app.use("/api/users", authMiddleware, userRoutes);
@@ -118,7 +120,7 @@ io.on("connection", (socket) => {
   socket.on("livestream_chat", (data) => io.emit("livestream_chat", data));
   socket.on("typing", (data) => socket.broadcast.emit("typing", data));
   socket.on("send_notification", (data) => socket.broadcast.emit("receive_notification", data));
-  socket.on("emergency_alert", (data) => io.emit("emergency_alert", data));
+  // Emergency alerts must use authenticated IFSE dispatch; do not accept public socket broadcasts.
   socket.on("voice_navigation", (data) => socket.emit("voice_navigation_response", { success: true, data }));
   socket.on("disconnect", () => console.log("Socket disconnected:", socket.id));
 });

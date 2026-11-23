@@ -155,8 +155,8 @@ def activate_sos_notification_only_access(
         ) from exc
 
 
-def verify_bearer_token(authorization):
-    """Validate a Firebase ID token and return its authenticated UID."""
+def verify_bearer_token(authorization, require_registered=False):
+    """Validate a Firebase ID token and optionally require a non-anonymous account."""
     if (
         not authorization
         or not authorization.startswith("Bearer ")
@@ -183,6 +183,17 @@ def verify_bearer_token(authorization):
         )
 
         uid = decoded_token.get("uid")
+        sign_in_provider = (
+            (decoded_token.get("firebase") or {}).get("sign_in_provider") or ""
+        )
+
+        if require_registered and (
+            not sign_in_provider or sign_in_provider == "anonymous"
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="A registered Inclura account is required for SOS actions.",
+            )
 
         if not uid:
             raise HTTPException(
@@ -982,7 +993,7 @@ def dispatch_ifse_emergency(
     emergency_id: str,
     authorization: str | None = Header(default=None),
 ):
-    uid = verify_bearer_token(authorization)
+    uid = verify_bearer_token(authorization, require_registered=True)
     emergency_id = emergency_id.strip()
     if not emergency_id:
         raise HTTPException(status_code=400, detail="An emergency ID is required.")
@@ -1033,11 +1044,19 @@ def dispatch_ifse_emergency(
                 if agency["ifseVerifiedRequired"]
                 else True
             )
+            linked_firebase_uid = str(
+                responder_data.get("firebaseUid")
+                or responder_data.get("firebaseUID")
+                or responder_data.get("userId")
+                or responder_data.get("uid")
+                or ""
+            ).strip()
             if (
                 responder_data.get("available") is True
                 and responder_data.get("onDuty") is True
                 and responder_data.get("verified") is True
                 and verified_for_agency
+                and bool(linked_firebase_uid)
                 and responder_data.get("suspended") is not True
             ):
                 eligible.append((responder_doc, responder_data))
@@ -1100,6 +1119,7 @@ def dispatch_ifse_emergency(
                 "escalationMinutes": int(rule.get("escalationMinutes") or 0),
                 "escalationLevel": 0,
                 "waitingForAcceptance": True,
+                "waitingStartedAt": firestore.SERVER_TIMESTAMP,
                 "accepted": False,
                 "acceptedAt": None,
                 "governmentEscalated": False,
@@ -1194,6 +1214,14 @@ def dispatch_ifse_emergency(
         })
         batch.commit()
 
+        # Send only the minimum incident and assignment data through an
+        # explicitly configured, signed HTTPS agency endpoint. If none is
+        # configured, the notification remains queued and is not called delivered.
+        from ifse_runtime import dispatch_agency_notification
+        agency_dispatch = dispatch_agency_notification(
+            db, emergency, assignment, agency
+        )
+
         db.collection("ifseAuditLogs").add({
             "module": "SOS",
             "ifseGenerated": True,
@@ -1224,6 +1252,8 @@ def dispatch_ifse_emergency(
             "responderName": responder_name,
             "responderId": responder_doc.id,
             "assignmentStatus": "Pending",
+            "agencyDispatchStatus": agency_dispatch.get("status"),
+            "agencyDispatchNotificationId": agency_dispatch.get("notificationId"),
             "administratorAlert": admin_alert,
             "message": (
                 "IFSE responder assignment created. Responder acceptance "
@@ -1313,7 +1343,7 @@ def send_sos_trusted_contact_sms(
     emergency_id: str,
     authorization: str | None = Header(default=None),
 ):
-    uid = verify_bearer_token(authorization)
+    uid = verify_bearer_token(authorization, require_registered=True)
     emergency_id = emergency_id.strip()
     if (
         not emergency_id
@@ -1321,6 +1351,13 @@ def send_sos_trusted_contact_sms(
         or len(emergency_id) > 150
     ):
         raise HTTPException(status_code=400, detail="Invalid emergency reference.")
+
+    # Paid SMS is disabled by default and requires explicit approval.
+    if os.getenv("SOS_SMS_ENABLED", "false").strip().lower() != "true":
+        raise HTTPException(
+            status_code=503,
+            detail="SOS SMS delivery is disabled by policy.",
+        )
 
     if not os.getenv("TERMII_API_KEY"):
         raise HTTPException(
@@ -1480,3 +1517,9 @@ def send_sos_trusted_contact_sms(
             status_code=500,
             detail="SOS SMS notifications could not be processed.",
         ) from exc
+
+# --------------------------------------------------
+# IFSE responder acceptance, arrival and protected escalation routes
+# --------------------------------------------------
+from ifse_runtime import router as ifse_runtime_router
+app.include_router(ifse_runtime_router)

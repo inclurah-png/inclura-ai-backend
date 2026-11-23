@@ -48,8 +48,18 @@ router.post("/:emergencyId/send", firebaseAuthMiddleware, async (req, res) => {
   const uid = req.firebaseUser?.uid;
   const emergencyId = String(req.params.emergencyId || "");
   if (!uid) return res.status(401).json({ success: false, message: "Sign in to continue." });
+  if (!req.firebaseUser?.signInProvider || req.firebaseUser.signInProvider === "anonymous") {
+    return res.status(403).json({
+      success: false,
+      message: "A registered Inclura account is required for SOS notifications."
+    });
+  }
   if (!emergencyId || emergencyId.includes("/") || emergencyId.length > 150) {
     return res.status(400).json({ success: false, message: "Invalid emergency reference." });
+  }
+  // Paid SMS is disabled by default. It requires explicit approval and opt-in.
+  if (String(process.env.SOS_SMS_ENABLED || "false").toLowerCase() !== "true") {
+    return res.status(503).json({ success: false, message: "SOS SMS delivery is disabled by policy." });
   }
   if (!process.env.TERMII_API_KEY) {
     return res.status(503).json({ success: false, message: "SMS delivery is not configured yet." });
@@ -77,8 +87,8 @@ router.post("/:emergencyId/send", firebaseAuthMiddleware, async (req, res) => {
     }
 
     const locationText = String(emergency.location || "").trim();
-    const lat = Number(emergency.latitude);
-    const lon = Number(emergency.longitude);
+    const lat = Number(emergency.gpsLatitude ?? emergency.latitude);
+    const lon = Number(emergency.gpsLongitude ?? emergency.longitude);
     const mapsLink = Number.isFinite(lat) && Number.isFinite(lon) &&
       (lat !== 0 || lon !== 0) ? " https://maps.google.com/?q=" + lat + "," + lon : "";
     const message = [
