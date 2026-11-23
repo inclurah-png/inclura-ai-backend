@@ -48,7 +48,7 @@ router.post("/:emergencyId/send", firebaseAuthMiddleware, async (req, res) => {
   const uid = req.firebaseUser?.uid;
   const emergencyId = String(req.params.emergencyId || "");
   if (!uid) return res.status(401).json({ success: false, message: "Sign in to continue." });
-  if (req.firebaseUser?.signInProvider === "anonymous") {
+  if (!req.firebaseUser?.signInProvider || req.firebaseUser.signInProvider === "anonymous") {
     return res.status(403).json({
       success: false,
       message: "A registered Inclura account is required for SOS notifications."
