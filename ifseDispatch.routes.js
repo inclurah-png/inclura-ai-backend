@@ -274,6 +274,7 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
         militaryEscalated: false,
         satelliteActivated: false,
         status: "Waiting",
+        waitingStartedAt: now,
         createdAt: now,
         updatedAt: now,
       });
@@ -388,6 +389,365 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
       emergencyRecorded: true,
       administratorAlertAttempted: true,
       message: error?.message || "IFSE dispatch failed.",
+    });
+  }
+});
+
+
+function verifyEscalationSecret(req) {
+  const expected = String(process.env.IFSE_ESCALATION_SECRET || "").trim();
+  const supplied = String(req.get("X-IFSE-Escalation-Secret") || "").trim();
+  if (!expected || !supplied || supplied.length !== expected.length) return false;
+  const crypto = require("crypto");
+  return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
+
+function isEligibleResponder(data, agency) {
+  const verificationSatisfied =
+    agency.ifseVerifiedRequired ? data.ifseVerified === true : true;
+
+  return (
+    data.available === true &&
+    data.onDuty === true &&
+    data.verified === true &&
+    verificationSatisfied &&
+    data.suspended !== true
+  );
+}
+
+async function findEligibleResponder(db, agency) {
+  const responderSnap = await db.collection(agency.responderCollection).get();
+  const eligible = responderSnap.docs.filter((doc) => isEligibleResponder(doc.data(), agency));
+  if (!eligible.length) return null;
+
+  const responder = eligible[0];
+  const responderData = responder.data();
+  return {
+    id: responder.id,
+    data: responderData,
+    name:
+      responderData.fullName ||
+      responderData.displayName ||
+      responderData.name ||
+      responderData.username ||
+      "Emergency Response Team",
+  };
+}
+
+function escalationAgencyForLevel(queue, level) {
+  if (level === 1) return queue.secondaryAgency || "";
+  if (level === 2) return queue.tertiaryAgency || "";
+  return "";
+}
+
+function markEscalationClass(flags, agencyType) {
+  const type = String(agencyType || "").toLowerCase();
+  if (type.includes("military") || type.includes("armed_forces")) {
+    flags.militaryEscalated = true;
+  } else if (
+    type.includes("paramilitary") ||
+    type.includes("civil_defence") ||
+    type.includes("civil defense")
+  ) {
+    flags.paramilitaryEscalated = true;
+  } else {
+    flags.governmentEscalated = true;
+  }
+}
+
+router.post("/escalate-due", async (req, res) => {
+  if (!verifyEscalationSecret(req)) {
+    return res.status(401).json({ success: false, message: "Unauthorised IFSE escalation request." });
+  }
+
+  try {
+    const db = getFirestore();
+    const queueSnap = await db.collection("emergencyEscalationQueue").get();
+    const now = new Date();
+    const results = [];
+
+    for (const queueDoc of queueSnap.docs) {
+      const queue = queueDoc.data();
+
+      if (
+        queue.waitingForAcceptance !== true ||
+        queue.accepted === true ||
+        queue.status !== "Waiting"
+      ) {
+        continue;
+      }
+
+      const waitingStartedAt = queue.waitingStartedAt || queue.updatedAt || queue.createdAt;
+      const waitingSince = waitingStartedAt?.toDate
+        ? waitingStartedAt.toDate()
+        : new Date(waitingStartedAt || now);
+      const escalationMinutes = Number(queue.escalationMinutes || 0);
+      const dueAt = waitingSince.getTime() + Math.max(0, escalationMinutes) * 60 * 1000;
+
+      if (now.getTime() < dueAt) continue;
+
+      const emergencyId = String(queue.emergencyId || "").trim();
+      if (!emergencyId) continue;
+
+      const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
+      const emergencySnap = await emergencyRef.get();
+      if (!emergencySnap.exists) {
+        await queueDoc.ref.set({
+          status: "Failed",
+          waitingForAcceptance: false,
+          escalationError: "Emergency record was not found.",
+          updatedAt: now
+        }, { merge: true });
+        results.push({ emergencyId, status: "failed", reason: "Emergency record not found." });
+        continue;
+      }
+
+      const emergency = emergencySnap.data();
+      let escalated = false;
+      let lastFailure = "";
+
+      for (let nextLevel = Number(queue.escalationLevel || 0) + 1; nextLevel <= 2; nextLevel++) {
+        const agencyIdentifier = escalationAgencyForLevel(queue, nextLevel);
+        if (!agencyIdentifier) {
+          lastFailure = "No configured agency for escalation level " + nextLevel + ".";
+          continue;
+        }
+
+        let agency;
+        try {
+          agency = await resolveAgency(db, agencyIdentifier);
+        } catch (error) {
+          lastFailure = error.message;
+          await db.collection("ifseAuditLogs").add({
+            module: "SOS",
+            ifseGenerated: true,
+            action: "ESCALATION_AGENCY_REJECTED",
+            emergencyId,
+            escalationLevel: nextLevel,
+            agencyRequested: agencyIdentifier,
+            actor: "IFSE Escalation Engine",
+            description: String(error.message || "Agency resolution failed.").slice(0, 500),
+            createdAt: now,
+            updatedAt: now
+          });
+          continue;
+        }
+
+        const responder = await findEligibleResponder(db, agency);
+        if (!responder) {
+          lastFailure = `No eligible responder found in ${agency.responderCollection}.`;
+          await db.collection("ifseAuditLogs").add({
+            module: "SOS",
+            ifseGenerated: true,
+            action: "ESCALATION_NO_RESPONDER",
+            emergencyId,
+            escalationLevel: nextLevel,
+            assignedAgency: agency.agencyName,
+            actor: "IFSE Escalation Engine",
+            description: lastFailure,
+            createdAt: now,
+            updatedAt: now
+          });
+          continue;
+        }
+
+        const assignmentId = `${emergencyId}_${responder.id}_L${nextLevel}`;
+        const assignmentRef = db.collection("emergencyAssignments").doc(assignmentId);
+        const existingAssignment = await assignmentRef.get();
+        if (existingAssignment.exists) {
+          const existing = existingAssignment.data();
+          if (existing.accepted === true || existing.assignmentStatus === "Accepted") {
+            await queueDoc.ref.set({
+              accepted: true,
+              waitingForAcceptance: false,
+              status: "Accepted",
+              acceptedAt: existing.acceptedAt || now,
+              updatedAt: now
+            }, { merge: true });
+            results.push({ emergencyId, status: "already-accepted", escalationLevel: nextLevel });
+            escalated = true;
+            break;
+          }
+          lastFailure = "An assignment already exists for this escalation level.";
+          continue;
+        }
+
+        const assignment = {
+          assignmentId,
+          emergencyId,
+          responderId: responder.id,
+          responderName: responder.name,
+          responderAgency: agency.agencyName,
+          responderAgencyCode: agency.agencyCode,
+          responderAgencyType: agency.agencyType,
+          responderCollection: agency.responderCollection,
+          responderType: responder.data.responderType || "Government",
+          assignedBy: "IFSE Automatic Escalation",
+          assignmentStatus: "Pending",
+          accepted: false,
+          acceptedAt: null,
+          arrived: false,
+          arrivedAt: null,
+          completed: false,
+          completedAt: null,
+          cancelled: false,
+          cancellationReason: "",
+          escalationLevel: nextLevel,
+          dispatchPriority: emergency.priority || queue.priority || "Low",
+          estimatedArrivalMinutes: Number(responder.data.estimatedArrivalMinutes || 0),
+          actualArrivalMinutes: 0,
+          satelliteDispatch: false,
+          automaticAssignment: true,
+          manualOverride: false,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        const escalationFlags = {
+          governmentEscalated: queue.governmentEscalated === true,
+          paramilitaryEscalated: queue.paramilitaryEscalated === true,
+          militaryEscalated: queue.militaryEscalated === true,
+        };
+        markEscalationClass(escalationFlags, agency.agencyType);
+
+        const batch = db.batch();
+        batch.set(assignmentRef, assignment);
+        batch.update(emergencyRef, {
+          status: "assigned",
+          assignedResponder: responder.name,
+          assignedResponderId: responder.id,
+          assignedAgency: agency.agencyName,
+          assignedAgencyCode: agency.agencyCode,
+          assignedAgencyType: agency.agencyType,
+          responderCollection: agency.responderCollection,
+          responseStatus: "Awaiting Responder Acceptance",
+          assignmentStatus: "Pending",
+          incidentStatus: "Escalated - Responder Assigned",
+          updatedAt: now,
+        });
+        batch.update(queueDoc.ref, {
+          escalationLevel: nextLevel,
+          waitingForAcceptance: true,
+          accepted: false,
+          acceptedAt: null,
+          status: "Waiting",
+          waitingStartedAt: now,
+          currentAgency: agency.agencyName,
+          currentAgencyCode: agency.agencyCode,
+          ...escalationFlags,
+          updatedAt: now,
+        });
+
+        const timelineRef = db.collection("emergencyTimeline").doc();
+        batch.set(timelineRef, {
+          timelineId: `${emergencyId}_escalation_${nextLevel}_${now.getTime()}`,
+          emergencyId,
+          eventType: "Responder Assignment Escalated",
+          eventDescription: `${agency.agencyName || "Authorized agency"} responder assigned automatically by IFSE escalation.`,
+          performedBy: "IFSE Escalation Engine",
+          performerType: "System",
+          responderId: responder.id,
+          responderAgency: agency.agencyName,
+          responderAgencyCode: agency.agencyCode,
+          responderAgencyType: agency.agencyType,
+          responderName: responder.name,
+          responderCollection: agency.responderCollection,
+          escalationLevel: nextLevel,
+          eventStatus: "Completed",
+          latitude: Number(emergency.gpsLatitude) || 0,
+          longitude: Number(emergency.gpsLongitude) || 0,
+          severity: emergency.priority || queue.priority || "Low",
+          ifseClassification: queue.ruleDocumentId || "",
+          visibleToFamily: true,
+          visibleToGovernment: true,
+          visibleToResponders: true,
+          createdAt: now,
+          updatedAt: now,
+        });
+
+        await batch.commit();
+
+        const agencyDispatch = await createAgencyDispatchRecord(
+          db,
+          emergency,
+          assignment,
+          agency
+        );
+
+        await db.collection("ifseAuditLogs").add({
+          module: "SOS",
+          ifseGenerated: true,
+          action: "RESPONDER_ESCALATED",
+          emergencyId,
+          actor: "IFSE Escalation Engine",
+          description: `Responder acceptance timeout reached. Case escalated to ${agency.agencyName}.`,
+          assignedAgency: agency.agencyName,
+          responderName: responder.name,
+          escalationLevel: nextLevel,
+          escalationStatus: "Waiting for responder acceptance",
+          agencyDispatchStatus: agencyDispatch.status,
+          agencyDispatchNotificationId: agencyDispatch.notificationId,
+          createdAt: now,
+          updatedAt: now
+        });
+
+        results.push({
+          emergencyId,
+          status: "escalated",
+          escalationLevel: nextLevel,
+          agency: agency.agencyName,
+          responderId: responder.id,
+          responderName: responder.name,
+          agencyDispatchStatus: agencyDispatch.status,
+          agencyDispatchNotificationId: agencyDispatch.notificationId
+        });
+        escalated = true;
+        break;
+      }
+
+      if (!escalated) {
+        const exhausted = Number(queue.escalationLevel || 0) >= 2 || !queue.secondaryAgency && !queue.tertiaryAgency;
+        await queueDoc.ref.set({
+          status: exhausted ? "Escalation Exhausted" : "Waiting",
+          waitingForAcceptance: exhausted ? false : true,
+          escalationError: lastFailure,
+          updatedAt: now
+        }, { merge: true });
+
+        await db.collection("ifseAuditLogs").add({
+          module: "SOS",
+          ifseGenerated: true,
+          action: exhausted ? "ESCALATION_EXHAUSTED" : "ESCALATION_PENDING_RETRY",
+          emergencyId,
+          actor: "IFSE Escalation Engine",
+          description: exhausted
+            ? "No further configured escalation agency/responder was available."
+            : String(lastFailure || "Escalation could not be completed; it will be retried."),
+          escalationLevel: Number(queue.escalationLevel || 0),
+          createdAt: now,
+          updatedAt: now
+        });
+
+        results.push({
+          emergencyId,
+          status: exhausted ? "exhausted" : "retry-pending",
+          reason: lastFailure
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      processedAt: now.toISOString(),
+      processed: results.length,
+      results
+    });
+  } catch (error) {
+    console.error("IFSE escalation engine failed:", error);
+    return res.status(500).json({
+      success: false,
+      message: "IFSE escalation engine failed.",
+      error: String(error.message || "Unknown error").slice(0, 300)
     });
   }
 });
