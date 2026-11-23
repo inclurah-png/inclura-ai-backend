@@ -57,6 +57,10 @@ router.post("/:emergencyId/send", firebaseAuthMiddleware, async (req, res) => {
   if (!emergencyId || emergencyId.includes("/") || emergencyId.length > 150) {
     return res.status(400).json({ success: false, message: "Invalid emergency reference." });
   }
+  // Paid SMS is disabled by default. It requires explicit approval and opt-in.
+  if (String(process.env.SOS_SMS_ENABLED || "false").toLowerCase() !== "true") {
+    return res.status(503).json({ success: false, message: "SOS SMS delivery is disabled by policy." });
+  }
   if (!process.env.TERMII_API_KEY) {
     return res.status(503).json({ success: false, message: "SMS delivery is not configured yet." });
   }
