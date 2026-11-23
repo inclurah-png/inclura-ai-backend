@@ -670,62 +670,85 @@ router.post("/escalate-due", async (req, res) => {
         };
         markEscalationClass(escalationFlags, agency.agencyType);
 
-        const batch = db.batch();
-        batch.set(assignmentRef, assignment);
-        batch.update(emergencyRef, {
-          status: "assigned",
-          assignedResponder: responder.name,
-          assignedResponderId: responder.id,
-          assignedAgency: agency.agencyName,
-          assignedAgencyCode: agency.agencyCode,
-          assignedAgencyType: agency.agencyType,
-          responderCollection: agency.responderCollection,
-          responseStatus: "Awaiting Responder Acceptance",
-          assignmentStatus: "Pending",
-          incidentStatus: "Escalated - Responder Assigned",
-          updatedAt: now,
-        });
-        batch.update(queueDoc.ref, {
-          escalationLevel: nextLevel,
-          waitingForAcceptance: true,
-          accepted: false,
-          acceptedAt: null,
-          status: "Waiting",
-          waitingStartedAt: now,
-          currentAgency: agency.agencyName,
-          currentAgencyCode: agency.agencyCode,
-          ...escalationFlags,
-          updatedAt: now,
-        });
-
         const timelineRef = db.collection("emergencyTimeline").doc();
-        batch.set(timelineRef, {
-          timelineId: `${emergencyId}_escalation_${nextLevel}_${now.getTime()}`,
-          emergencyId,
-          eventType: "Responder Assignment Escalated",
-          eventDescription: `${agency.agencyName || "Authorized agency"} responder assigned automatically by IFSE escalation.`,
-          performedBy: "IFSE Escalation Engine",
-          performerType: "System",
-          responderId: responder.id,
-          responderAgency: agency.agencyName,
-          responderAgencyCode: agency.agencyCode,
-          responderAgencyType: agency.agencyType,
-          responderName: responder.name,
-          responderCollection: agency.responderCollection,
-          escalationLevel: nextLevel,
-          eventStatus: "Completed",
-          latitude: Number(emergency.gpsLatitude) || 0,
-          longitude: Number(emergency.gpsLongitude) || 0,
-          severity: emergency.priority || queue.priority || "Low",
-          ifseClassification: queue.ruleDocumentId || "",
-          visibleToFamily: true,
-          visibleToGovernment: true,
-          visibleToResponders: true,
-          createdAt: now,
-          updatedAt: now,
+        const assignmentCommitted = await db.runTransaction(async (tx) => {
+          const latestQueueSnap = await tx.get(queueDoc.ref);
+          const latestEmergencySnap = await tx.get(emergencyRef);
+          const latestAssignmentSnap = await tx.get(assignmentRef);
+          if (!latestQueueSnap.exists || !latestEmergencySnap.exists) return false;
+          const latestQueue = latestQueueSnap.data();
+          const latestEmergency = latestEmergencySnap.data();
+          if (
+            latestQueue.escalationLeaseToken !== leaseToken ||
+            latestQueue.waitingForAcceptance !== true ||
+            latestQueue.accepted === true ||
+            latestQueue.status !== "Waiting" ||
+            latestAssignmentSnap.exists ||
+            String(latestEmergency.assignedResponderId || "") === String(responder.id)
+          ) return false;
+
+          tx.create(assignmentRef, assignment);
+          tx.update(emergencyRef, {
+            status: "assigned",
+            assignedResponder: responder.name,
+            assignedResponderId: responder.id,
+            assignedAgency: agency.agencyName,
+            assignedAgencyCode: agency.agencyCode,
+            assignedAgencyType: agency.agencyType,
+            responderCollection: agency.responderCollection,
+            responseStatus: "Awaiting Responder Acceptance",
+            assignmentStatus: "Pending",
+            incidentStatus: "Escalated - Responder Assigned",
+            updatedAt: now,
+          });
+          tx.update(queueDoc.ref, {
+            escalationLevel: nextLevel,
+            waitingForAcceptance: true,
+            accepted: false,
+            acceptedAt: null,
+            status: "Waiting",
+            waitingStartedAt: now,
+            escalationLeaseToken: "",
+            escalationLeaseUntil: new Date(0),
+            currentAgency: agency.agencyName,
+            currentAgencyCode: agency.agencyCode,
+            ...escalationFlags,
+            updatedAt: now,
+          });
+          tx.set(timelineRef, {
+            timelineId: `${emergencyId}_escalation_${nextLevel}_${now.getTime()}`,
+            emergencyId,
+            eventType: "Responder Assignment Escalated",
+            eventDescription: `${agency.agencyName || "Authorized agency"} responder assigned automatically by IFSE escalation.`,
+            performedBy: "IFSE Escalation Engine",
+            performerType: "System",
+            responderId: responder.id,
+            responderAgency: agency.agencyName,
+            responderAgencyCode: agency.agencyCode,
+            responderAgencyType: agency.agencyType,
+            responderName: responder.name,
+            responderCollection: agency.responderCollection,
+            escalationLevel: nextLevel,
+            eventStatus: "Completed",
+            latitude: Number(emergency.gpsLatitude) || 0,
+            longitude: Number(emergency.gpsLongitude) || 0,
+            severity: emergency.priority || queue.priority || "Low",
+            ifseClassification: queue.ruleDocumentId || "",
+            visibleToFamily: true,
+            visibleToGovernment: true,
+            visibleToResponders: true,
+            createdAt: now,
+            updatedAt: now,
+          });
+          return true;
         });
 
-        await batch.commit();
+        if (!assignmentCommitted) {
+          results.push({ emergencyId, status: "claim-lost-or-case-updated", escalationLevel: nextLevel });
+          await releaseLease();
+          escalated = true;
+          break;
+        }
 
         const agencyDispatch = await createAgencyDispatchRecord(
           db,
