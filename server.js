@@ -118,7 +118,7 @@ io.on("connection", (socket) => {
   socket.on("livestream_chat", (data) => io.emit("livestream_chat", data));
   socket.on("typing", (data) => socket.broadcast.emit("typing", data));
   socket.on("send_notification", (data) => socket.broadcast.emit("receive_notification", data));
-  socket.on("emergency_alert", (data) => io.emit("emergency_alert", data));
+  // Emergency alerts must use authenticated IFSE dispatch; do not accept public socket broadcasts.
   socket.on("voice_navigation", (data) => socket.emit("voice_navigation_response", { success: true, data }));
   socket.on("disconnect", () => console.log("Socket disconnected:", socket.id));
 });
