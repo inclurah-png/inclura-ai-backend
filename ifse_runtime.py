@@ -343,13 +343,25 @@ def _timed_value(value):
         return 0
 
 
-def _eligible_responder(db, agency):
+def _eligible_responder(db, agency, emergency_id):
+    # Never reassign this incident to a responder who already has an
+    # assignment for it, including a prior cancelled/superseded assignment.
+    prior_assignments = (
+        db.collection("emergencyAssignments")
+        .where("emergencyId", "==", emergency_id)
+        .get()
+    )
+    previously_assigned = {
+        str((item.to_dict() or {}).get("responderId") or "")
+        for item in prior_assignments
+    }
     docs = db.collection(agency["responderCollection"]).get()
     for doc in docs:
         data = doc.to_dict() or {}
         verified = agency.get("ifseVerifiedRequired") is not True or data.get("ifseVerified") is True
         if (
-            data.get("available") is True and data.get("onDuty") is True
+            doc.id not in previously_assigned
+            and data.get("available") is True and data.get("onDuty") is True
             and data.get("verified") is True and verified
             and data.get("suspended") is not True and bool(_linked_uid(data))
         ):
@@ -426,7 +438,7 @@ def escalate_due_sos(
                 })
                 processed.append({"emergencyId": queue.get("emergencyId"), "status": "no-secondary-agency"})
                 continue
-            responder_doc, responder_data = _eligible_responder(db, agency)
+            responder_doc, responder_data = _eligible_responder(db, agency, str(queue.get("emergencyId") or ""))
             if not responder_doc:
                 raise RuntimeError("No eligible responder is available in the next authorised agency.")
             emergency_id = str(queue.get("emergencyId") or "")
@@ -440,7 +452,7 @@ def escalate_due_sos(
                 or responder_data.get("name") or responder_data.get("username")
                 or "Emergency Response Team"
             )
-            assignment_id = emergency_id + "_" + responder_doc.id
+            assignment_id = emergency_id + "_escalation_" + str(next_level) + "_" + responder_doc.id
             assignment_ref = db.collection("emergencyAssignments").document(assignment_id)
             assignment = {
                 "assignmentId": assignment_id, "emergencyId": emergency_id,
