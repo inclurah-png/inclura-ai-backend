@@ -25,6 +25,8 @@ jobs:
           node --check server.js
           node --check firebaseAuth.middleware.js
           node --check ifseDispatch.routes.js
+          node --check responderResponse.routes.js
+          node --check agencyDispatch.service.js
           node --check sosNotifications.routes.js
       - name: Install backend requirements
         run: |
