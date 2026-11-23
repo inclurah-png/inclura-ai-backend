@@ -1,6 +1,7 @@
 const express = require("express");
 const { getFirestore, getFirebaseAuth } = require("./firebaseAdmin");
 const firebaseAuthMiddleware = require("./firebaseAuth.middleware");
+const { createAgencyDispatchRecord } = require("./agencyDispatch.service");
 
 const router = express.Router();
 
@@ -330,6 +331,8 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
     });
 
     await batch.commit();
+    const agencyDispatch = await createAgencyDispatchRecord(db, emergency, assignment, primaryAgency);
+
     await db.collection("ifseAuditLogs").add({
       module: "SOS",
       ifseGenerated: true,
@@ -357,6 +360,8 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
       responderName,
       responderId: responder.id,
       assignmentStatus: "Pending",
+      agencyDispatchStatus: agencyDispatch.status,
+      agencyDispatchNotificationId: agencyDispatch.notificationId,
       administratorAlert: adminAlert,
       message: "IFSE responder assignment created. Responder acceptance and arrival are not yet confirmed.",
     });
