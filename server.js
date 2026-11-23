@@ -40,6 +40,7 @@ const creatorScoreRoutes = require("./creatorScore.routes");
 const postReactionRoutes = require("./postReactions.routes");
 const sosNotificationsRoutes = require("./sosNotifications.routes");
 const ifseDispatchRoutes = require("./ifseDispatch.routes");
+const responderResponseRoutes = require("./responderResponse.routes");
 
 const authMiddleware = require("./auth.middleware");
 const errorMiddleware = require("./error.middleware");
@@ -95,6 +96,7 @@ app.use("/api/posts", postReactionRoutes);
 app.use("/api/creator-score", creatorScoreRoutes);
 app.use("/api/sos-notifications", sosNotificationsRoutes);
 app.use("/api/ifse-dispatch", ifseDispatchRoutes);
+app.use("/api/responder-response", responderResponseRoutes);
 
 // Existing protected routes
 app.use("/api/users", authMiddleware, userRoutes);
