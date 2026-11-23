@@ -1,0 +1,25 @@
+name: IFSE Automatic Escalation
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  escalate-due-sos:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger protected IFSE escalation engine
+        env:
+          IFSE_ESCALATION_URL: ${{ secrets.IFSE_ESCALATION_URL }}
+          IFSE_ESCALATION_SECRET: ${{ secrets.IFSE_ESCALATION_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$IFSE_ESCALATION_URL"
+          test -n "$IFSE_ESCALATION_SECRET"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "X-IFSE-Escalation-Secret: $IFSE_ESCALATION_SECRET" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "$IFSE_ESCALATION_URL"
