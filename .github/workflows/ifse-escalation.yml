@@ -21,6 +21,13 @@ jobs:
           set -euo pipefail
           test -n "$IFSE_ESCALATION_URL"
           test -n "$IFSE_ESCALATION_SECRET"
+          case "$IFSE_ESCALATION_URL" in
+            https://*/api/ifse-dispatch/escalate-due) ;;
+            *)
+              echo "IFSE_ESCALATION_URL must be the HTTPS FastAPI escalation endpoint."
+              exit 1
+              ;;
+          esac
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header "X-IFSE-Escalation-Secret: $IFSE_ESCALATION_SECRET" \
