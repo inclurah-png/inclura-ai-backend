@@ -542,7 +542,10 @@ router.post("/escalate-due", async (req, res) => {
       }
 
       const emergencyId = String(queue.emergencyId || "").trim();
-      if (!emergencyId) continue;
+      if (!emergencyId) {
+        await releaseLease();
+        continue;
+      }
 
       const emergencyRef = db.collection("emergencySOS").doc(emergencyId);
       const emergencySnap = await emergencyRef.get();
