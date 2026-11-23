@@ -178,12 +178,16 @@ router.post("/:emergencyId/dispatch", firebaseAuthMiddleware, async (req, res) =
       const data = doc.data();
       const verificationSatisfied =
         primaryAgency.ifseVerifiedRequired ? data.ifseVerified === true : true;
+      const linkedFirebaseUid = String(
+        data.firebaseUid || data.firebaseUID || data.userId || data.uid || ""
+      ).trim();
 
       return (
         data.available === true &&
         data.onDuty === true &&
         data.verified === true &&
         verificationSatisfied &&
+        Boolean(linkedFirebaseUid) &&
         data.suspended !== true
       );
     });
@@ -405,12 +409,16 @@ function verifyEscalationSecret(req) {
 function isEligibleResponder(data, agency) {
   const verificationSatisfied =
     agency.ifseVerifiedRequired ? data.ifseVerified === true : true;
+  const linkedFirebaseUid = String(
+    data.firebaseUid || data.firebaseUID || data.userId || data.uid || ""
+  ).trim();
 
   return (
     data.available === true &&
     data.onDuty === true &&
     data.verified === true &&
     verificationSatisfied &&
+    Boolean(linkedFirebaseUid) &&
     data.suspended !== true
   );
 }
