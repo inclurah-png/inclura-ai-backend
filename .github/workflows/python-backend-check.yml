@@ -38,7 +38,7 @@ jobs:
         run: |
           python - <<'PY'
           from app import app
-          paths = {route.path for route in app.routes}
+          paths = set(app.openapi()["paths"])
           assert "/api/ifse-dispatch/{emergency_id}/dispatch" in paths
           assert "/api/responder-response/{emergency_id}/accept" in paths
           assert "/api/responder-response/{emergency_id}/arrived" in paths
