@@ -474,25 +474,68 @@ router.post("/escalate-due", async (req, res) => {
     const now = new Date();
     const results = [];
 
-    for (const queueDoc of queueSnap.docs) {
-      const queue = queueDoc.data();
+    const crypto = require("crypto");
+    const leaseToken = crypto.randomUUID();
 
-      if (
-        queue.waitingForAcceptance !== true ||
-        queue.accepted === true ||
-        queue.status !== "Waiting"
-      ) {
-        continue;
-      }
+    for (const queueDoc of queueSnap.docs) {
+      // Claim each due queue atomically. Concurrent workers cannot both own
+      // the same queue; abandoned claims expire automatically.
+      const claim = await db.runTransaction(async (tx) => {
+        const freshSnap = await tx.get(queueDoc.ref);
+        if (!freshSnap.exists) return { acquired: false };
+        const fresh = freshSnap.data();
+        if (
+          fresh.waitingForAcceptance !== true ||
+          fresh.accepted === true ||
+          fresh.status !== "Waiting"
+        ) return { acquired: false };
+
+        const leaseUntil = fresh.escalationLeaseUntil?.toDate
+          ? fresh.escalationLeaseUntil.toDate()
+          : new Date(fresh.escalationLeaseUntil || 0);
+        if (leaseUntil.getTime() > now.getTime()) return { acquired: false };
+
+        const started = fresh.waitingStartedAt || fresh.updatedAt || fresh.createdAt;
+        const startedAt = started?.toDate ? started.toDate() : new Date(started || 0);
+        const minutes = Number(fresh.escalationMinutes);
+        if (!Number.isFinite(minutes) || minutes <= 0 || !Number.isFinite(startedAt.getTime())) {
+          return { acquired: false, invalidTimer: true };
+        }
+        const due = startedAt.getTime() + minutes * 60 * 1000;
+        if (now.getTime() < due) return { acquired: false };
+
+        tx.update(queueDoc.ref, {
+          escalationLeaseToken: leaseToken,
+          escalationLeaseUntil: new Date(now.getTime() + 4 * 60 * 1000),
+          updatedAt: now
+        });
+        return { acquired: true, queue: fresh };
+      });
+
+      if (!claim.acquired) continue;
+      const queue = claim.queue;
+      const releaseLease = async () => {
+        await queueDoc.ref.set({
+          escalationLeaseToken: "",
+          escalationLeaseUntil: new Date(0),
+          updatedAt: new Date()
+        }, { merge: true });
+      };
 
       const waitingStartedAt = queue.waitingStartedAt || queue.updatedAt || queue.createdAt;
       const waitingSince = waitingStartedAt?.toDate
         ? waitingStartedAt.toDate()
         : new Date(waitingStartedAt || now);
-      const escalationMinutes = Number(queue.escalationMinutes || 0);
-      const dueAt = waitingSince.getTime() + Math.max(0, escalationMinutes) * 60 * 1000;
-
-      if (now.getTime() < dueAt) continue;
+      const escalationMinutes = Number(queue.escalationMinutes);
+      const dueAt = waitingSince.getTime() + escalationMinutes * 60 * 1000;
+      if (!Number.isFinite(escalationMinutes) || escalationMinutes <= 0 || !Number.isFinite(waitingSince.getTime())) {
+        await releaseLease();
+        continue;
+      }
+      if (now.getTime() < dueAt) {
+        await releaseLease();
+        continue;
+      }
 
       const emergencyId = String(queue.emergencyId || "").trim();
       if (!emergencyId) continue;
@@ -507,6 +550,7 @@ router.post("/escalate-due", async (req, res) => {
           updatedAt: now
         }, { merge: true });
         results.push({ emergencyId, status: "failed", reason: "Emergency record not found." });
+        await releaseLease();
         continue;
       }
 
@@ -573,6 +617,7 @@ router.post("/escalate-due", async (req, res) => {
               updatedAt: now
             }, { merge: true });
             results.push({ emergencyId, status: "already-accepted", escalationLevel: nextLevel });
+            await releaseLease();
             escalated = true;
             break;
           }
@@ -640,6 +685,8 @@ router.post("/escalate-due", async (req, res) => {
           acceptedAt: null,
           status: "Waiting",
           waitingStartedAt: now,
+          escalationLeaseToken: "",
+          escalationLeaseUntil: new Date(0),
           currentAgency: agency.agencyName,
           currentAgencyCode: agency.agencyCode,
           ...escalationFlags,
@@ -741,6 +788,11 @@ router.post("/escalate-due", async (req, res) => {
           status: exhausted ? "exhausted" : "retry-pending",
           reason: lastFailure
         });
+        await releaseLease();
+      } else {
+        // If a next-level assignment was committed, its batch already released
+        // the lease. This is a harmless idempotent cleanup for all other paths.
+        await releaseLease();
       }
     }
 
