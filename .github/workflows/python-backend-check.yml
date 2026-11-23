@@ -33,13 +33,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Compile backend
-        run: python -m py_compile app.py
+        run: python -m py_compile app.py ifse_runtime.py
       - name: Verify FastAPI routes
         run: |
           python - <<'PY'
           from app import app
           paths = {route.path for route in app.routes}
           assert "/api/ifse-dispatch/{emergency_id}/dispatch" in paths
+          assert "/api/responder-response/{emergency_id}/accept" in paths
+          assert "/api/responder-response/{emergency_id}/arrived" in paths
+          assert "/api/ifse-dispatch/escalate-due" in paths
           assert "/api/creator-score/award" in paths
           assert "/api/posts/{post_id}/react" in paths
           assert "/api/sos-notifications/{emergency_id}/send" in paths
