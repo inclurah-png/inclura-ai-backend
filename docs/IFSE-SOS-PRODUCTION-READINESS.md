@@ -1,5 +1,17 @@
 # IFSE SOS production-readiness checklist
 
+## 0. Runtime architecture
+
+The deployed Render service uses the existing Python FastAPI application started with `uvicorn app:app`. The production IFSE routes in this pull request are mounted from `ifse_runtime.py` into that FastAPI application. Keep Render's existing Python start command; do not switch this service to the unused Express entry point.
+
+FastAPI routes added for responder and escalation workflows:
+
+- `POST /api/responder-response/{emergency_id}/accept`
+- `POST /api/responder-response/{emergency_id}/arrived`
+- `POST /api/ifse-dispatch/escalate-due` (protected by `X-IFSE-Escalation-Secret`)
+
+Initial SOS dispatch remains `POST /api/ifse-dispatch/{emergency_id}/dispatch`. It creates the assignment and invokes the backend-only signed agency gateway. An agency endpoint is contacted only when that agency's HTTPS URL and shared signing secret have been configured by an authorised administrator. Otherwise the agency notification remains `queued`.
+
 This document describes configuration that must be verified before SOS can be described as operational. Repository code and passing CI do not prove that live Firestore records, responder accounts, agency partnerships, or external delivery channels exist.
 
 ## 1. Required Firestore configuration
