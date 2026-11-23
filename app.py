@@ -155,8 +155,8 @@ def activate_sos_notification_only_access(
         ) from exc
 
 
-def verify_bearer_token(authorization):
-    """Validate a Firebase ID token and return its authenticated UID."""
+def verify_bearer_token(authorization, require_registered=False):
+    """Validate a Firebase ID token and optionally require a non-anonymous account."""
     if (
         not authorization
         or not authorization.startswith("Bearer ")
@@ -183,6 +183,17 @@ def verify_bearer_token(authorization):
         )
 
         uid = decoded_token.get("uid")
+        sign_in_provider = (
+            (decoded_token.get("firebase") or {}).get("sign_in_provider") or ""
+        )
+
+        if require_registered and (
+            not sign_in_provider or sign_in_provider == "anonymous"
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="A registered Inclura account is required for SOS actions.",
+            )
 
         if not uid:
             raise HTTPException(
@@ -982,7 +993,7 @@ def dispatch_ifse_emergency(
     emergency_id: str,
     authorization: str | None = Header(default=None),
 ):
-    uid = verify_bearer_token(authorization)
+    uid = verify_bearer_token(authorization, require_registered=True)
     emergency_id = emergency_id.strip()
     if not emergency_id:
         raise HTTPException(status_code=400, detail="An emergency ID is required.")
@@ -1313,7 +1324,7 @@ def send_sos_trusted_contact_sms(
     emergency_id: str,
     authorization: str | None = Header(default=None),
 ):
-    uid = verify_bearer_token(authorization)
+    uid = verify_bearer_token(authorization, require_registered=True)
     emergency_id = emergency_id.strip()
     if (
         not emergency_id
@@ -1321,6 +1332,13 @@ def send_sos_trusted_contact_sms(
         or len(emergency_id) > 150
     ):
         raise HTTPException(status_code=400, detail="Invalid emergency reference.")
+
+    # Paid SMS is disabled by default and requires explicit approval.
+    if os.getenv("SOS_SMS_ENABLED", "false").strip().lower() != "true":
+        raise HTTPException(
+            status_code=503,
+            detail="SOS SMS delivery is disabled by policy.",
+        )
 
     if not os.getenv("TERMII_API_KEY"):
         raise HTTPException(
