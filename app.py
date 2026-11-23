@@ -207,6 +207,52 @@ def verify_bearer_token(authorization):
         ) from exc
 
 
+
+def verify_registered_bearer_token(authorization):
+    """Validate a Firebase ID token and reject anonymous Firebase sessions."""
+    if (
+        not authorization
+        or not authorization.startswith("Bearer ")
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Please sign in with a registered account to continue.",
+        )
+
+    id_token = authorization[7:].strip()
+    if not id_token:
+        raise HTTPException(
+            status_code=401,
+            detail="A valid registered-account token is required.",
+        )
+
+    try:
+        firebase_app = get_firebase_admin()
+        decoded_token = auth.verify_id_token(id_token, app=firebase_app)
+        uid = decoded_token.get("uid")
+        provider = (decoded_token.get("firebase") or {}).get("sign_in_provider")
+        if not uid:
+            raise HTTPException(status_code=401, detail="Invalid authentication token.")
+        if provider == "anonymous":
+            raise HTTPException(
+                status_code=403,
+                detail="Registered member authentication is required for SOS dispatch.",
+            )
+        return uid
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(
+            "Registered Firebase token verification failed:",
+            type(exc).__name__,
+            str(exc),
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Please sign in again with a registered account.",
+        ) from exc
+
+
 # --------------------------------------------------
 # HEALTH CHECK
 # --------------------------------------------------
@@ -982,7 +1028,7 @@ def dispatch_ifse_emergency(
     emergency_id: str,
     authorization: str | None = Header(default=None),
 ):
-    uid = verify_bearer_token(authorization)
+    uid = verify_registered_bearer_token(authorization)
     emergency_id = emergency_id.strip()
     if not emergency_id:
         raise HTTPException(status_code=400, detail="An emergency ID is required.")
