@@ -1214,6 +1214,14 @@ def dispatch_ifse_emergency(
         })
         batch.commit()
 
+        # Send only the minimum incident and assignment data through an
+        # explicitly configured, signed HTTPS agency endpoint. If none is
+        # configured, the notification remains queued and is not called delivered.
+        from ifse_runtime import dispatch_agency_notification
+        agency_dispatch = dispatch_agency_notification(
+            db, emergency, assignment, agency
+        )
+
         db.collection("ifseAuditLogs").add({
             "module": "SOS",
             "ifseGenerated": True,
@@ -1244,6 +1252,8 @@ def dispatch_ifse_emergency(
             "responderName": responder_name,
             "responderId": responder_doc.id,
             "assignmentStatus": "Pending",
+            "agencyDispatchStatus": agency_dispatch.get("status"),
+            "agencyDispatchNotificationId": agency_dispatch.get("notificationId"),
             "administratorAlert": admin_alert,
             "message": (
                 "IFSE responder assignment created. Responder acceptance "
