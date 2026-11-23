@@ -1044,11 +1044,19 @@ def dispatch_ifse_emergency(
                 if agency["ifseVerifiedRequired"]
                 else True
             )
+            linked_firebase_uid = str(
+                responder_data.get("firebaseUid")
+                or responder_data.get("firebaseUID")
+                or responder_data.get("userId")
+                or responder_data.get("uid")
+                or ""
+            ).strip()
             if (
                 responder_data.get("available") is True
                 and responder_data.get("onDuty") is True
                 and responder_data.get("verified") is True
                 and verified_for_agency
+                and bool(linked_firebase_uid)
                 and responder_data.get("suspended") is not True
             ):
                 eligible.append((responder_doc, responder_data))
@@ -1111,6 +1119,7 @@ def dispatch_ifse_emergency(
                 "escalationMinutes": int(rule.get("escalationMinutes") or 0),
                 "escalationLevel": 0,
                 "waitingForAcceptance": True,
+                "waitingStartedAt": firestore.SERVER_TIMESTAMP,
                 "accepted": False,
                 "acceptedAt": None,
                 "governmentEscalated": False,
@@ -1498,3 +1507,9 @@ def send_sos_trusted_contact_sms(
             status_code=500,
             detail="SOS SMS notifications could not be processed.",
         ) from exc
+
+# --------------------------------------------------
+# IFSE responder acceptance, arrival and protected escalation routes
+# --------------------------------------------------
+from ifse_runtime import router as ifse_runtime_router
+app.include_router(ifse_runtime_router)
