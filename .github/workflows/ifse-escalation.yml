@@ -5,6 +5,10 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: ifse-automatic-escalation
+  cancel-in-progress: false
+
 jobs:
   escalate-due-sos:
     runs-on: ubuntu-latest
