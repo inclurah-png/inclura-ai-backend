@@ -87,8 +87,8 @@ router.post("/:emergencyId/send", firebaseAuthMiddleware, async (req, res) => {
     }
 
     const locationText = String(emergency.location || "").trim();
-    const lat = Number(emergency.latitude);
-    const lon = Number(emergency.longitude);
+    const lat = Number(emergency.gpsLatitude ?? emergency.latitude);
+    const lon = Number(emergency.gpsLongitude ?? emergency.longitude);
     const mapsLink = Number.isFinite(lat) && Number.isFinite(lon) &&
       (lat !== 0 || lon !== 0) ? " https://maps.google.com/?q=" + lat + "," + lon : "";
     const message = [
